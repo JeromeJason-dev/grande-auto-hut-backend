@@ -5,6 +5,12 @@ from django.core.validators import RegexValidator
 
 
 class User(AbstractUser):
+    """
+    Custom user model. Email is the login field. Role drives permission
+    checks throughout the API (see accounts.permissions) - never trust
+    role checks done only in the frontend.
+    """
+
     class Role(models.TextChoices):
         CUSTOMER = "customer", "Customer"
         STAFF = "staff", "Staff"
