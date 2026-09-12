@@ -48,11 +48,6 @@ class VehicleYear(models.Model):
 
 
 class Fitment(models.Model):
-    """
-    Through model for the Product <-> VehicleYear many-to-many. This is the
-    single source of truth for 'does this part fit that vehicle' - never
-    duplicate this logic in the frontend.
-    """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     product = models.ForeignKey("catalog.Product", related_name="fitments", on_delete=models.CASCADE)
     vehicle_year = models.ForeignKey(VehicleYear, related_name="fitments", on_delete=models.CASCADE)
