@@ -17,7 +17,7 @@ class CategoryDetailView(generics.RetrieveAPIView):
     queryset = Category.objects.filter(is_active=True)
     serializer_class = CategorySerializer
     permission_classes = [AllowAnyReadOnlyOrStaffWrite]
-    lookup_field = "slug"
+    lookup_field = "pk"  # Matches <uuid:pk> in urls.py
 
 
 # --- Brands ---
@@ -30,7 +30,7 @@ class BrandDetailView(generics.RetrieveAPIView):
     queryset = Brand.objects.filter(is_active=True)
     serializer_class = BrandSerializer
     permission_classes = [AllowAnyReadOnlyOrStaffWrite]
-    lookup_field = "slug"
+    lookup_field = "pk"  # Matches <uuid:pk> in urls.py
 
 
 # --- Products Filter ---
@@ -67,4 +67,4 @@ class ProductDetailView(generics.RetrieveAPIView):
     )
     serializer_class = ProductDetailSerializer
     permission_classes = [AllowAnyReadOnlyOrStaffWrite]
-    lookup_field = "slug"
+    lookup_field = "pk"  
