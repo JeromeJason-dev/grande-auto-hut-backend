@@ -264,3 +264,7 @@ MPESA_CALLBACK_BASE_URL = os.getenv("MPESA_CALLBACK_BASE_URL")
 
 # Default Primary Key Field Type
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+
+FRONTEND_URL = "http://localhost:3000"
