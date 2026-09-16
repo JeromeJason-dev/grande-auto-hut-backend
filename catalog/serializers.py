@@ -1,17 +1,42 @@
+from django.utils.text import slugify
 from rest_framework import serializers
 from .models import Category, Brand, Product, ProductImage
 
 
+def unique_slug(model, name, slug_field="slug"):
+    base = slugify(name)
+    slug = base
+    suffix = 1
+    while model.objects.filter(**{slug_field: slug}).exists():
+        suffix += 1
+        slug = f"{base}-{suffix}"
+    return slug
+
+
 class CategorySerializer(serializers.ModelSerializer):
+    slug = serializers.SlugField(max_length=140, required=False, help_text="Auto-generated from name if omitted.")
+
     class Meta:
         model = Category
         fields = ["id", "name", "slug", "parent", "is_active"]
 
+    def create(self, validated_data):
+        if not validated_data.get("slug"):
+            validated_data["slug"] = unique_slug(Category, validated_data["name"])
+        return super().create(validated_data)
+
 
 class BrandSerializer(serializers.ModelSerializer):
+    slug = serializers.SlugField(max_length=140, required=False, help_text="Auto-generated from name if omitted.")
+
     class Meta:
         model = Brand
         fields = ["id", "name", "slug", "logo", "is_active"]
+
+    def create(self, validated_data):
+        if not validated_data.get("slug"):
+            validated_data["slug"] = unique_slug(Brand, validated_data["name"])
+        return super().create(validated_data)
 
 
 class ProductImageSerializer(serializers.ModelSerializer):
@@ -62,8 +87,7 @@ class ProductDetailSerializer(serializers.ModelSerializer):
 
 
 class ProductWriteSerializer(serializers.ModelSerializer):
-    """Staff/admin create & update. Stock changes here are for corrections only
-    - normal stock movement goes through the inventory app's transaction log."""
+    slug = serializers.SlugField(max_length=280, required=False, help_text="Auto-generated from name if omitted.")
 
     class Meta:
         model = Product
@@ -72,3 +96,8 @@ class ProductWriteSerializer(serializers.ModelSerializer):
             "condition", "price", "stock_quantity", "low_stock_threshold", "is_active",
         ]
         read_only_fields = ["id"]
+
+    def create(self, validated_data):
+        if not validated_data.get("slug"):
+            validated_data["slug"] = unique_slug(Product, validated_data["name"])
+        return super().create(validated_data)
