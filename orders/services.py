@@ -83,7 +83,6 @@ def checkout(cart: Cart, user, address_data: dict, payment_method: str) -> Order
     cart.items.all().delete()
 
     if payment_method == Order.PaymentMethod.COD:
-        # No payment gateway to wait on - confirm (and decrement stock) immediately.
         confirm_order(order, user=user, note="Auto-confirmed: Pay on Delivery.")
 
     return order
@@ -128,7 +127,13 @@ def confirm_order(order: Order, user=None, note="Order confirmed.") -> Order:
 @transaction.atomic
 def cancel_order(order: Order, user=None, note="Order cancelled.") -> Order:
     assert_valid_transition(order, Order.Status.CANCELLED)
-    was_stock_reserved = order.status in (Order.Status.CONFIRMED, Order.Status.PROCESSING, Order.Status.IN_TRANSIT)
+    was_stock_reserved = order.status in (
+        Order.Status.CONFIRMED, 
+        Order.Status.PROCESSING, 
+        Order.Status.SHIPPED, 
+        Order.Status.DELIVERED,
+        Order.Status.IN_TRANSIT
+    )
 
     order.status = Order.Status.CANCELLED
     order.save(update_fields=["status", "updated_at"])
@@ -155,12 +160,31 @@ def cancel_order(order: Order, user=None, note="Order cancelled.") -> Order:
 
 @transaction.atomic
 def update_status(order: Order, new_status: str, user=None, note="") -> Order:
+    # 1. Handle specialized target states that require separate business flows or custom logic
     if new_status == Order.Status.CONFIRMED:
         return confirm_order(order, user=user, note=note or "Order confirmed.")
+    
     if new_status == Order.Status.CANCELLED:
         return cancel_order(order, user=user, note=note or "Order cancelled.")
 
+    # 2. Enforce structural state machine validation first (prevents illegal jumps)
     assert_valid_transition(order, new_status)
+
+    # 3. Handle intermediate stock deduction if moving out of pending directly into processing 
+    if order.status == Order.Status.PENDING and new_status == Order.Status.PROCESSING:
+        for item in order.items.select_related("product"):
+            try:
+                adjust_stock(
+                    product_id=item.product_id,
+                    delta=-item.quantity,
+                    transaction_type=InventoryTransaction.TransactionType.ORDER_CONFIRM,
+                    order=order,
+                    note=f"Order {order.order_number}",
+                    user=user,
+                )
+            except InsufficientStockError as exc:
+                raise CheckoutError(str(exc)) from exc
+
     order.status = new_status
     order.save(update_fields=["status", "updated_at"])
     _record_history(order, new_status, user=user, note=note)
