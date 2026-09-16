@@ -38,27 +38,32 @@ class TicketListCreateView(generics.ListCreateAPIView):
         return Response(TicketDetailSerializer(ticket).data, status=status.HTTP_201_CREATED)
 
 
-class TicketDetailView(views.APIView):
+class TicketDetailView(generics.RetrieveUpdateDestroyAPIView):
+    queryset = Ticket.objects.all()
+    serializer_class = TicketDetailSerializer
     permission_classes = [permissions.IsAuthenticated, IsOwnerOrStaff]
+    lookup_field = "id"
 
-    def get_ticket(self, request, id):
-        ticket = get_object_or_404(Ticket, id=id)
-        self.check_object_permissions(request, ticket)
-        return ticket
+    def get_queryset(self):
+        base = Ticket.objects.select_related("user")
+        return base if self.request.user.is_staff_role else base.filter(user=self.request.user)
 
-    def get(self, request, id):
-        ticket = self.get_ticket(request, id)
-        return Response(TicketDetailSerializer(ticket).data)
-
-    def patch(self, request, id):
+    def patch(self, request, *args, **kwargs):
         if not request.user.is_staff_role:
             raise PermissionDenied("Only staff can update a ticket's status.")
-        ticket = self.get_ticket(request, id)
+        
+        ticket = self.get_object()
         serializer = TicketStatusUpdateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         ticket.status = serializer.validated_data["status"]
         ticket.save(update_fields=["status", "updated_at"])
         return Response(TicketDetailSerializer(ticket).data)
+
+    def delete(self, request, *args, **kwargs):
+        ticket = self.get_object()
+        self.check_object_permissions(request, ticket)
+        ticket.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class TicketMessageCreateView(views.APIView):
