@@ -34,7 +34,6 @@ def _set_refresh_cookie(response, refresh_token: str):
 
 
 class RegisterView(generics.CreateAPIView):
-    """POST /api/auth/register/ - public."""
     queryset = User.objects.all()
     serializer_class = RegisterSerializer
     permission_classes = [permissions.AllowAny]
@@ -50,39 +49,41 @@ class RegisterView(generics.CreateAPIView):
             "Thanks for creating an account. Start with our Fitment Finder to find parts for your vehicle.",
         )
 
-        refresh = RefreshToken.for_user(user)
-        response = Response(
-            {"user": MeSerializer(user).data, "access": str(refresh.access_token)},
+        return Response(
+            {
+                "message": "Account created successfully. Please log in to get your token.",
+                "user": MeSerializer(user).data
+            },
             status=status.HTTP_201_CREATED,
         )
-        _set_refresh_cookie(response, refresh)
-        return response
 
 
 class LoginView(TokenObtainPairView):
-    """
-    POST /api/auth/login/ - email + password.
-    Access token returned in body; refresh token set as httpOnly cookie only.
-    """
-
     def post(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+        
         access = serializer.validated_data["access"]
         refresh = serializer.validated_data["refresh"]
-        response = Response({"access": str(access)}, status=status.HTTP_200_OK)
+        
+        # Include both tokens in the response body payload
+        response = Response(
+            {
+                "access": str(access),
+                "refresh": str(refresh),
+            }, 
+            status=status.HTTP_200_OK
+        )
+        
+        # Keep setting the secure HttpOnly cookie as a backup/alternative auth method
         _set_refresh_cookie(response, refresh)
         return response
 
 
 class RefreshView(TokenRefreshView):
-    """
-    POST /api/auth/refresh/ - reads refresh token from httpOnly cookie
-    (not the request body), rotates it, and returns a fresh access token.
-    """
-
     def post(self, request, *args, **kwargs):
-        refresh_token = request.COOKIES.get(settings.REFRESH_COOKIE_NAME)
+        # Support reading refresh token from cookie or fallback to request body payload
+        refresh_token = request.COOKIES.get(settings.REFRESH_COOKIE_NAME) or request.data.get("refresh")
         if not refresh_token:
             return Response({"detail": "Refresh token missing."}, status=status.HTTP_401_UNAUTHORIZED)
 
@@ -94,18 +95,20 @@ class RefreshView(TokenRefreshView):
 
         access = serializer.validated_data["access"]
         response = Response({"access": str(access)}, status=status.HTTP_200_OK)
+        
         new_refresh = serializer.validated_data.get("refresh")
         if new_refresh:
+            response.data["refresh"] = str(new_refresh)
             _set_refresh_cookie(response, new_refresh)
+            
         return response
 
 
 class LogoutView(APIView):
-    """POST /api/auth/logout/ - blacklists refresh cookie and clears it."""
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request):
-        refresh_token = request.COOKIES.get(settings.REFRESH_COOKIE_NAME)
+        refresh_token = request.COOKIES.get(settings.REFRESH_COOKIE_NAME) or request.data.get("refresh")
         if refresh_token:
             try:
                 RefreshToken(refresh_token).blacklist()
@@ -117,7 +120,6 @@ class LogoutView(APIView):
 
 
 class MeView(generics.RetrieveUpdateAPIView):
-    """GET/PATCH /api/auth/me/"""
     permission_classes = [permissions.IsAuthenticated]
 
     def get_object(self):
@@ -132,7 +134,6 @@ class MeView(generics.RetrieveUpdateAPIView):
 
 
 class ChangePasswordView(APIView):
-    """POST /api/auth/change-password/"""
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request):
@@ -144,7 +145,6 @@ class ChangePasswordView(APIView):
 
 
 class PasswordResetRequestView(APIView):
-    """POST /api/auth/password-reset/ - always returns 200 to avoid email enumeration."""
     permission_classes = [permissions.AllowAny]
 
     def post(self, request):
@@ -166,7 +166,6 @@ class PasswordResetRequestView(APIView):
 
 
 class PasswordResetConfirmView(APIView):
-    """POST /api/auth/password-reset/confirm/"""
     permission_classes = [permissions.AllowAny]
 
     def post(self, request):
@@ -188,7 +187,6 @@ class PasswordResetConfirmView(APIView):
 
 
 class AddressViewSet(viewsets.ModelViewSet):
-    """/api/auth/addresses/ - a user's own delivery addresses."""
     serializer_class = AddressSerializer
     permission_classes = [permissions.IsAuthenticated, IsOwnerOrStaff]
 
