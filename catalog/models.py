@@ -83,9 +83,6 @@ class Product(models.Model):
     description = models.TextField(blank=True)
     condition = models.CharField(max_length=20, choices=Condition.choices, default=Condition.AFTERMARKET)
 
-    # Nullable so existing standalone products (and any part that only
-    # ever ships in one condition) don't need a family at all. A product
-    # with no family is treated by the frontend as a "family of one."
     family = models.ForeignKey(
         ProductFamily,
         related_name="variants",
@@ -95,9 +92,6 @@ class Product(models.Model):
     )
 
     price = models.DecimalField(max_digits=10, decimal_places=2, validators=[MinValueValidator(0)])
-    # Stock lives on the product for fast read access; every mutation must also
-    # write an InventoryTransaction row (see inventory app) - never edit this
-    # field directly outside that flow once orders are involved.
     stock_quantity = models.PositiveIntegerField(default=0)
     low_stock_threshold = models.PositiveIntegerField(default=5)
 
@@ -105,8 +99,6 @@ class Product(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
-    # Fitment: which vehicle years this product fits. Through model lives in
-    # the fitment app so fitment-specific data (notes, position) has a home.
     vehicle_years = models.ManyToManyField(
         "fitment.VehicleYear",
         through="fitment.Fitment",
@@ -121,11 +113,6 @@ class Product(models.Model):
             models.Index(fields=["sku"]),
         ]
         constraints = [
-            # A family can only have one row per condition - you can't
-            # have two "genuine" variants of the same physical part.
-            # Rows with family=NULL are exempt (NULL is never treated as
-            # equal to NULL in a unique constraint), so standalone
-            # products are unaffected.
             models.UniqueConstraint(
                 fields=["family", "condition"],
                 name="unique_condition_per_family",
