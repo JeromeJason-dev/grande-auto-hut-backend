@@ -39,27 +39,6 @@ class BrandSerializer(serializers.ModelSerializer):
         return super().create(validated_data)
 
 
-class ProductFamilySerializer(serializers.ModelSerializer):
-    """
-    Read/write representation of a physical part that groups condition
-    variants together. Used both as its own endpoint (so an admin can
-    create a family before attaching products to it) and nested inside
-    product responses.
-    """
-    slug = serializers.SlugField(max_length=280, required=False, help_text="Auto-generated from name if omitted.")
-    category = serializers.CharField(source="category.name", read_only=True)
-    variant_count = serializers.IntegerField(source="variants.count", read_only=True)
-
-    class Meta:
-        model = ProductFamily
-        fields = ["id", "name", "slug", "category", "is_active", "variant_count"]
-
-    def create(self, validated_data):
-        if not validated_data.get("slug"):
-            validated_data["slug"] = unique_slug(ProductFamily, validated_data["name"])
-        return super().create(validated_data)
-
-
 class ProductImageSerializer(serializers.ModelSerializer):
     class Meta:
         model = ProductImage
@@ -102,6 +81,69 @@ class ProductListSerializer(serializers.ModelSerializer):
 
     def get_family_name(self, obj):
         return obj.family.name if obj.family_id else None
+
+
+class ProductFamilySerializer(serializers.ModelSerializer):
+    slug = serializers.SlugField(max_length=280, required=False, help_text="Auto-generated from name if omitted.")
+    
+    # Accept category ID on write, expose category name on read
+    category = serializers.PrimaryKeyRelatedField(
+        queryset=Category.objects.all(), write_only=True, required=True
+    )
+    category_name = serializers.CharField(source="category.name", read_only=True)
+    
+    variant_count = serializers.IntegerField(source="variants.count", read_only=True)
+    
+    # New write-only field to assign products during family creation/update
+    product_ids = serializers.PrimaryKeyRelatedField(
+        many=True, 
+        queryset=Product.objects.all(), 
+        write_only=True, 
+        required=False,
+        help_text="List of Product UUIDs to assign to this family."
+    )
+    
+    # Optional: Display the variants in the family detail view
+    variants = ProductListSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = ProductFamily
+        fields = [
+            "id", "name", "slug", "category", "category_name", 
+            "is_active", "variant_count", "product_ids", "variants"
+        ]
+
+    def validate_product_ids(self, products):
+        conditions = [p.condition for p in products]
+        if len(conditions) != len(set(conditions)):
+            raise serializers.ValidationError(
+                "Cannot group products with duplicate conditions into the same family. "
+                "Each product in a family must have a unique condition (Genuine, Aftermarket, Refurbished)."
+            )
+        return products
+
+    def create(self, validated_data):
+        product_ids = validated_data.pop("product_ids", [])
+        if not validated_data.get("slug"):
+            validated_data["slug"] = unique_slug(ProductFamily, validated_data["name"])
+        
+        family = super().create(validated_data)
+        
+        if product_ids:
+            Product.objects.filter(id__in=[p.id for p in product_ids]).update(family=family)
+            
+        return family
+
+    def update(self, instance, validated_data):
+        product_ids = validated_data.pop("product_ids", None)
+        family = super().update(instance, validated_data)
+        
+        if product_ids is not None:
+            # Unlink products no longer in the list, and assign the new ones
+            Product.objects.filter(family=family).exclude(id__in=[p.id for p in product_ids]).update(family=None)
+            Product.objects.filter(id__in=[p.id for p in product_ids]).update(family=family)
+            
+        return family
 
 
 class ProductDetailSerializer(serializers.ModelSerializer):

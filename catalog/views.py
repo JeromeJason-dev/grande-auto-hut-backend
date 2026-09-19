@@ -39,14 +39,15 @@ class ProductFamilyListView(generics.ListCreateAPIView):
     """
     Create a family here first (e.g. POST {"name": "Aluminum Engine
     Coolant Radiator", "category": <category-id>}), then attach products
-    to it by setting `family` to this family's id on each Product.
+    to it by setting `family` to this family's id on each Product, 
+    or passing `product_ids` directly.
     """
-    queryset = ProductFamily.objects.filter(is_active=True)
+    queryset = ProductFamily.objects.filter(is_active=True).select_related("category").prefetch_related("variants__images")
     serializer_class = ProductFamilySerializer
     permission_classes = [AllowAnyReadOnlyOrStaffWrite]
 
 class ProductFamilyDetailView(generics.RetrieveUpdateDestroyAPIView):
-    queryset = ProductFamily.objects.filter(is_active=True)
+    queryset = ProductFamily.objects.filter(is_active=True).select_related("category").prefetch_related("variants__images")
     serializer_class = ProductFamilySerializer
     permission_classes = [AllowAnyReadOnlyOrStaffWrite]
     lookup_field = "pk"
