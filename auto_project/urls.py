@@ -11,10 +11,6 @@ urlpatterns = [
     # Auth
     path("api/auth/", include("accounts.urls")),
     path('api/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
-
-    # Feature apps - fitment MUST come before catalog: catalog's
-    # ProductViewSet detail route (/api/products/<slug>/) would otherwise
-    # greedily swallow /api/products/fitment/ by treating "fitment" as a slug.
     path("api/", include("fitment.urls")),
     path("api/", include("catalog.urls")),
     path("api/", include("orders.urls")),
