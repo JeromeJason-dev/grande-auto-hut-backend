@@ -35,10 +35,44 @@ class Brand(models.Model):
         return self.name
 
 
+class ProductFamily(models.Model):
+    """
+    Represents one physical part, independent of which condition it's
+    sold in. A family groups its Product rows (genuine / aftermarket /
+    refurbished) so the storefront can render them as a single card with
+    a condition switcher, and a single detail page listing every
+    price/SKU/stock combination.
+
+    Brand is deliberately NOT here — genuine vs. aftermarket variants of
+    the same part are usually different brands (e.g. "Denso" vs "Generic
+    Aftermarket" in the coolant radiator example), so brand stays on the
+    Product row. Fitment (vehicle_years) also stays on Product, since it's
+    declared per-row today; in practice it'll usually be identical across
+    a family's variants.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=255)
+    slug = models.SlugField(max_length=280, unique=True)
+    category = models.ForeignKey(
+        Category, related_name="product_families", on_delete=models.PROTECT
+    )
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name_plural = "Product families"
+        ordering = ["name"]
+
+    def __str__(self):
+        return self.name
+
+
 class Product(models.Model):
     class Condition(models.TextChoices):
         GENUINE = "genuine", "Genuine (OEM)"
         AFTERMARKET = "aftermarket", "Aftermarket"
+        REFURBISHED = "refurbished", "Refurbished"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     sku = models.CharField(max_length=64, unique=True)
@@ -48,6 +82,17 @@ class Product(models.Model):
     brand = models.ForeignKey(Brand, related_name="products", on_delete=models.PROTECT)
     description = models.TextField(blank=True)
     condition = models.CharField(max_length=20, choices=Condition.choices, default=Condition.AFTERMARKET)
+
+    # Nullable so existing standalone products (and any part that only
+    # ever ships in one condition) don't need a family at all. A product
+    # with no family is treated by the frontend as a "family of one."
+    family = models.ForeignKey(
+        ProductFamily,
+        related_name="variants",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+    )
 
     price = models.DecimalField(max_digits=10, decimal_places=2, validators=[MinValueValidator(0)])
     # Stock lives on the product for fast read access; every mutation must also
@@ -74,6 +119,17 @@ class Product(models.Model):
         indexes = [
             models.Index(fields=["slug"]),
             models.Index(fields=["sku"]),
+        ]
+        constraints = [
+            # A family can only have one row per condition - you can't
+            # have two "genuine" variants of the same physical part.
+            # Rows with family=NULL are exempt (NULL is never treated as
+            # equal to NULL in a unique constraint), so standalone
+            # products are unaffected.
+            models.UniqueConstraint(
+                fields=["family", "condition"],
+                name="unique_condition_per_family",
+            ),
         ]
 
     def __str__(self):
