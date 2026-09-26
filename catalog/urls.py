@@ -21,5 +21,7 @@ urlpatterns = [
 
     # --- Products ---
     path("products/", ProductListView.as_view(), name="product-list"),
-    path("products/<uuid:pk>/", ProductDetailView.as_view(), name="product-detail"),
+    # Fixed: ProductDetailView now looks up by slug (see views.py),
+    # so the URL converter must accept a slug string, not a UUID.
+    path("products/<slug:slug>/", ProductDetailView.as_view(), name="product-detail"),
 ]
