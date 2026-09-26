@@ -91,7 +91,7 @@ class ProductDetailView(generics.RetrieveUpdateDestroyAPIView):
         "images", "fitments__vehicle_year__model__make"
     )
     permission_classes = [AllowAnyReadOnlyOrStaffWrite]
-    lookup_field = "pk"
+    lookup_field = "slug"
 
     def get_serializer_class(self):
         return ProductWriteSerializer if self.request.method in ("PUT", "PATCH") else ProductDetailSerializer
