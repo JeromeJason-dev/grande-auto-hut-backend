@@ -28,7 +28,6 @@ def _set_refresh_cookie(response, refresh_token: str):
         httponly=True,
         secure=settings.REFRESH_COOKIE_SECURE,
         samesite=settings.REFRESH_COOKIE_SAMESITE,
-        max_age=7 * 24 * 60 * 60,
         path="/api/auth/",
     )
 
