@@ -92,8 +92,11 @@ class OrderListView(generics.ListAPIView):
 
     def get_queryset(self):
         if self.request.user.is_staff_role:
-            return Order.objects.all()
-        return Order.objects.filter(user=self.request.user)
+            queryset = Order.objects.all()
+        else:
+            queryset = Order.objects.filter(user=self.request.user)
+     
+        return queryset.order_by("-created_at")
 
 
 class OrderDetailView(generics.RetrieveAPIView):
@@ -103,8 +106,7 @@ class OrderDetailView(generics.RetrieveAPIView):
     def get_object(self):
         queryset = Order.objects.all() if self.request.user.is_staff_role else Order.objects.filter(user=self.request.user)
         lookup_val = self.kwargs.get("id")
-        
-        # Support lookup by either UUID id or order_number string
+
         filter_kwargs = {"id": lookup_val}
         try:
             import uuid
