@@ -5,7 +5,6 @@ from .views import (
 )
 
 urlpatterns = [
-    path("cart/", CartView.as_type() if hasattr(CartView, 'as_type') else CartView.as_view(), name="cart"), # standard as_view below
     path("cart/", CartView.as_view(), name="cart"),
     path("cart/items/", CartItemCreateView.as_view(), name="cart-item-add"),
     path("cart/items/<uuid:pk>/", CartItemDetailView.as_view(), name="cart-item-detail"),
