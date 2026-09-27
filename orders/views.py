@@ -1,7 +1,7 @@
 from django.shortcuts import get_object_or_404
 from rest_framework import generics, permissions, status, views
 from rest_framework.response import Response
-from rest_framework.exceptions import ValidationError, PermissionDenied
+from rest_framework.exceptions import ValidationError
 from django_filters.rest_framework import DjangoFilterBackend
 from accounts.permissions import IsStaffOrAdmin
 from .models import Cart, CartItem, Order
@@ -99,12 +99,20 @@ class OrderListView(generics.ListAPIView):
 class OrderDetailView(generics.RetrieveAPIView):
     serializer_class = OrderDetailSerializer
     permission_classes = [permissions.IsAuthenticated]
-    lookup_field = "id"
 
-    def get_queryset(self):
-        if self.request.user.is_staff_role:
-            return Order.objects.all()
-        return Order.objects.filter(user=self.request.user)
+    def get_object(self):
+        queryset = Order.objects.all() if self.request.user.is_staff_role else Order.objects.filter(user=self.request.user)
+        lookup_val = self.kwargs.get("id")
+        
+        # Support lookup by either UUID id or order_number string
+        filter_kwargs = {"id": lookup_val}
+        try:
+            import uuid
+            uuid.UUID(str(lookup_val))
+        except ValueError:
+            filter_kwargs = {"order_number": lookup_val}
+
+        return get_object_or_404(queryset, **filter_kwargs)
 
 
 class OrderStatusUpdateView(views.APIView):
@@ -121,9 +129,6 @@ class OrderStatusUpdateView(views.APIView):
                 user=request.user,
                 note=serializer.validated_data.get("note", ""),
             )
-        except InvalidTransitionError as exc:
-            raise ValidationError(str(exc))
-        except CheckoutError as exc:
-            # e.g. confirming an order but stock vanished in the meantime
+        except (InvalidTransitionError, CheckoutError) as exc:
             raise ValidationError(str(exc))
         return Response(OrderDetailSerializer(order).data)
