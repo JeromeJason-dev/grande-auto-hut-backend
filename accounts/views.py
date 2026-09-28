@@ -16,6 +16,7 @@ from .permissions import IsOwnerOrStaff
 from .serializers import (
     RegisterSerializer, MeSerializer, ProfileUpdateSerializer, ChangePasswordSerializer,
     PasswordResetRequestSerializer, PasswordResetConfirmSerializer, AddressSerializer,
+    AdminCustomerSerializer,
 )
 
 User = get_user_model()
@@ -61,19 +62,19 @@ class LoginView(TokenObtainPairView):
     def post(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        
+
         access = serializer.validated_data["access"]
         refresh = serializer.validated_data["refresh"]
-        
+
         # Include both tokens in the response body payload
         response = Response(
             {
                 "access": str(access),
                 "refresh": str(refresh),
-            }, 
+            },
             status=status.HTTP_200_OK
         )
-        
+
         # Keep setting the secure HttpOnly cookie as a backup/alternative auth method
         _set_refresh_cookie(response, refresh)
         return response
@@ -94,12 +95,12 @@ class RefreshView(TokenRefreshView):
 
         access = serializer.validated_data["access"]
         response = Response({"access": str(access)}, status=status.HTTP_200_OK)
-        
+
         new_refresh = serializer.validated_data.get("refresh")
         if new_refresh:
             response.data["refresh"] = str(new_refresh)
             _set_refresh_cookie(response, new_refresh)
-            
+
         return response
 
 
@@ -194,3 +195,24 @@ class AddressViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         serializer.save(user=self.request.user)
+
+
+class IsStaffRole(permissions.BasePermission):
+    def has_permission(self, request, view):
+        user = request.user
+        if not (user and user.is_authenticated):
+            return False
+        return bool(
+            user.is_staff
+            or user.is_superuser
+            or getattr(user, "role", User.Role.CUSTOMER) != User.Role.CUSTOMER
+        )
+
+
+class AdminCustomerListView(generics.ListAPIView):
+    serializer_class = AdminCustomerSerializer
+    permission_classes = [IsStaffRole]
+    pagination_class = None  # full list; the admin page searches it client-side
+
+    def get_queryset(self):
+        return User.objects.filter(role=User.Role.CUSTOMER).order_by("-created_at")

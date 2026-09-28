@@ -76,3 +76,10 @@ class AddressSerializer(serializers.ModelSerializer):
             "street_address", "building_or_estate", "is_default", "created_at",
         ]
         read_only_fields = ["id", "created_at"]
+
+
+class AdminCustomerSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+        fields = ["id", "email", "first_name", "last_name", "phone_number", "created_at"]
+        read_only_fields = fields
