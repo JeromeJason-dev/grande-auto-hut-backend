@@ -111,6 +111,27 @@ class Order(models.Model):
         payment = self.payments.filter(status="success").first()
         return bool(payment) or self.payment_method == self.PaymentMethod.COD
 
+    @property
+    def payment_status(self):
+        """
+        Derived, display-level payment state: "paid", "pending" or "failed".
+
+        Computed from the related payments (via .all(), so it reuses
+        prefetch_related("payments") and costs no extra queries in list views).
+        Not stored, so no migration is needed.
+        """
+        statuses = [p.status for p in self.payments.all()]
+
+        if "success" in statuses:
+            return "paid"
+        # Cash on delivery counts as paid once the goods have been delivered.
+        if self.payment_method == self.PaymentMethod.COD and self.status == self.Status.DELIVERED:
+            return "paid"
+        # Only failed attempts and nothing still in flight.
+        if statuses and all(s == "failed" for s in statuses):
+            return "failed"
+        return "pending"
+
 
 class OrderItem(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)

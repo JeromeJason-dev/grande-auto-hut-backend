@@ -1,6 +1,6 @@
 import uuid
 
-from django.db.models import Sum
+from django.db.models import Count, Sum
 from django.db.models.functions import Coalesce
 from django.shortcuts import get_object_or_404
 from rest_framework import generics, permissions, status, views
@@ -102,10 +102,15 @@ class OrderListView(generics.ListAPIView):
 
         return (
             queryset
-            # customer name/email are read from the related user: one JOIN instead of N queries
+            # Customer name/email come from the related user: one JOIN, not N queries.
             .select_related("user")
-            # total units across the order's line items, used for the "Quantity" column
-            .annotate(total_quantity=Coalesce(Sum("items__quantity"), 0))
+            # Payment status is derived from payments: one extra query for the whole page.
+            .prefetch_related("payments")
+            # Line-item count and total units, both from the same single JOIN on items.
+            .annotate(
+                items_count=Count("items", distinct=True),
+                total_quantity=Coalesce(Sum("items__quantity"), 0),
+            )
             .order_by("-created_at")
         )
 
@@ -115,7 +120,10 @@ class OrderDetailView(generics.RetrieveAPIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get_object(self):
-        queryset = Order.objects.all() if self.request.user.is_staff_role else Order.objects.filter(user=self.request.user)
+        queryset = (
+            Order.objects.all() if self.request.user.is_staff_role
+            else Order.objects.filter(user=self.request.user)
+        ).select_related("user").prefetch_related("payments", "items", "status_history")
         lookup_val = self.kwargs.get("id")
 
         filter_kwargs = {"id": lookup_val}
@@ -131,7 +139,7 @@ class OrderStatusUpdateView(views.APIView):
     permission_classes = [IsStaffOrAdmin]
 
     def patch(self, request, id):
-        order = get_object_or_404(Order, id=id)
+        order = get_object_or_404(Order.objects.select_related("user"), id=id)
         serializer = OrderStatusUpdateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         try:

@@ -98,22 +98,59 @@ class OrderStatusHistorySerializer(serializers.ModelSerializer):
         fields = ["status", "note", "changed_by_email", "created_at"]
 
 
-class OrderListSerializer(serializers.ModelSerializer):
-    items_count = serializers.IntegerField(source="items.count", read_only=True)
+class CustomerFieldsMixin(serializers.Serializer):
+    """Shared customer info, read from the order's related user."""
 
-    class Meta:
-        model = Order
-        fields = ["id", "order_number", "status", "payment_method", "total", "items_count", "created_at"]
+    customer_name = serializers.SerializerMethodField()
+    customer_email = serializers.EmailField(source="user.email", read_only=True)
+
+    def get_customer_name(self, obj):
+        user = obj.user
+        full_name = ""
+        get_full_name = getattr(user, "get_full_name", None)
+        if callable(get_full_name):
+            full_name = (get_full_name() or "").strip()
+        # Fall back to the delivery recipient, then the account email.
+        return full_name or obj.recipient_name or user.email
 
 
-class OrderDetailSerializer(serializers.ModelSerializer):
-    items = OrderItemSerializer(many=True, read_only=True)
-    status_history = OrderStatusHistorySerializer(many=True, read_only=True)
+class OrderListSerializer(CustomerFieldsMixin, serializers.ModelSerializer):
+    payment_status = serializers.CharField(read_only=True)
+    items_count = serializers.SerializerMethodField()
+    total_quantity = serializers.SerializerMethodField()
 
     class Meta:
         model = Order
         fields = [
-            "id", "order_number", "status", "payment_method",
+            "id", "order_number", "status",
+            "customer_name", "customer_email",
+            "payment_method", "payment_status",
+            "total", "items_count", "total_quantity", "created_at",
+        ]
+
+    # OrderListView annotates these so the list costs no per-row queries.
+    # The fallbacks keep this serializer correct if used on a plain queryset.
+    def get_items_count(self, obj):
+        value = getattr(obj, "items_count", None)
+        return value if value is not None else obj.items.count()
+
+    def get_total_quantity(self, obj):
+        value = getattr(obj, "total_quantity", None)
+        if value is not None:
+            return value
+        return sum(item.quantity for item in obj.items.all())
+
+
+class OrderDetailSerializer(CustomerFieldsMixin, serializers.ModelSerializer):
+    items = OrderItemSerializer(many=True, read_only=True)
+    status_history = OrderStatusHistorySerializer(many=True, read_only=True)
+    payment_status = serializers.CharField(read_only=True)
+
+    class Meta:
+        model = Order
+        fields = [
+            "id", "order_number", "status", "payment_method", "payment_status",
+            "customer_name", "customer_email",
             "recipient_name", "phone_number", "county", "town", "street_address", "building_or_estate",
             "subtotal", "shipping_fee", "total", "items", "status_history", "created_at", "updated_at",
         ]
