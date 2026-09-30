@@ -1,3 +1,7 @@
+import uuid
+
+from django.db.models import Sum
+from django.db.models.functions import Coalesce
 from django.shortcuts import get_object_or_404
 from rest_framework import generics, permissions, status, views
 from rest_framework.response import Response
@@ -95,8 +99,15 @@ class OrderListView(generics.ListAPIView):
             queryset = Order.objects.all()
         else:
             queryset = Order.objects.filter(user=self.request.user)
-     
-        return queryset.order_by("-created_at")
+
+        return (
+            queryset
+            # customer name/email are read from the related user: one JOIN instead of N queries
+            .select_related("user")
+            # total units across the order's line items, used for the "Quantity" column
+            .annotate(total_quantity=Coalesce(Sum("items__quantity"), 0))
+            .order_by("-created_at")
+        )
 
 
 class OrderDetailView(generics.RetrieveAPIView):
@@ -109,7 +120,6 @@ class OrderDetailView(generics.RetrieveAPIView):
 
         filter_kwargs = {"id": lookup_val}
         try:
-            import uuid
             uuid.UUID(str(lookup_val))
         except ValueError:
             filter_kwargs = {"order_number": lookup_val}

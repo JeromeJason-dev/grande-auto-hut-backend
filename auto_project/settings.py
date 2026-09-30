@@ -54,19 +54,7 @@ SECRET_KEY = os.getenv('DJANGO_SECRET_KEY')
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = env_bool('DJANGO_DEBUG', env_bool('DEBUG', True))
 
-ALLOWED_HOSTS = env_list('DJANGO_ALLOWED_HOSTS', '*')
-
-SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
-
-
-# ---------------------------------------------------------------------------
-# Frontend (deployed on Vercel)
-# ---------------------------------------------------------------------------
-# No trailing slash - CORS origins must match exactly.
-FRONTEND_URL = os.getenv(
-    'FRONTEND_URL',
-    'https://grande-auto-hut-frontend-sigma.vercel.app',
-).rstrip('/')
+ALLOWED_HOSTS = ['*']
 
 
 # Application definition
@@ -212,42 +200,21 @@ SIMPLE_JWT = {
 }
 
 
+# Refresh-token cookie settings used by accounts.views
 REFRESH_COOKIE_NAME = os.getenv('REFRESH_COOKIE_NAME', 'gah_refresh_token')
-REFRESH_COOKIE_SAMESITE = os.getenv(
-    'REFRESH_COOKIE_SAMESITE',
-    'Lax' if DEBUG else 'None',
-)
-# Browsers reject SameSite=None cookies that are not Secure, so force it.
-REFRESH_COOKIE_SECURE = (
-    True
-    if REFRESH_COOKIE_SAMESITE.lower() == 'none'
-    else env_bool('REFRESH_COOKIE_SECURE', not DEBUG)
-)
+REFRESH_COOKIE_SECURE = env_bool('REFRESH_COOKIE_SECURE', not DEBUG)
+REFRESH_COOKIE_SAMESITE = os.getenv('REFRESH_COOKIE_SAMESITE', 'Lax')
 
 
 # CORS Settings
 CORS_ALLOW_CREDENTIALS = True
-
-_default_cors_origins = ','.join([
-    'http://localhost:3000',
-    'http://127.0.0.1:3000',
-    'http://localhost:5173',
-    'http://127.0.0.1:5173',
-    FRONTEND_URL,
-])
-CORS_ALLOWED_ORIGINS = env_list('CORS_ALLOWED_ORIGINS', _default_cors_origins)
-
-if FRONTEND_URL not in CORS_ALLOWED_ORIGINS:
-    CORS_ALLOWED_ORIGINS.append(FRONTEND_URL)
-
-CORS_ALLOWED_ORIGIN_REGEXES = env_list('CORS_ALLOWED_ORIGIN_REGEXES', '')
+CORS_ALLOWED_ORIGINS = env_list(
+    'CORS_ALLOWED_ORIGINS', 
+    'http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173'
+)
 
 
-CSRF_TRUSTED_ORIGINS = [
-    origin for origin in CORS_ALLOWED_ORIGINS if origin.startswith(('http://', 'https://'))
-]
-
-
+# DRF Spectacular OpenAPI Documentation Settings
 SPECTACULAR_SETTINGS = {
     'TITLE': 'Grande Auto Hut API',
     'DESCRIPTION': 'API for the Grande Auto Hut e-commerce platform (fitment finder, catalog, orders, M-Pesa payments).',
@@ -293,3 +260,5 @@ MPESA_CALLBACK_BASE_URL = os.getenv("MPESA_CALLBACK_BASE_URL")
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+
+FRONTEND_URL = "http://localhost:3000"
