@@ -46,12 +46,8 @@ def env_int(key, default=0):
 
 
 # Quick-start development settings - unsuitable for production
-# See https://docs.djangoproject.com/en/6.1/howto/deployment/checklist/
-
-# SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = os.getenv('DJANGO_SECRET_KEY')
 
-# SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = env_bool('DJANGO_DEBUG', env_bool('DEBUG', True))
 
 ALLOWED_HOSTS = ['*']
@@ -125,8 +121,6 @@ WSGI_APPLICATION = 'auto_project.wsgi.application'
 
 
 # Database
-# https://docs.djangoproject.com/en/6.1/ref/settings/#databases
-
 DATABASES = {
     "default": dj_database_url.parse(os.getenv('DATABASE_URL'))
 }
@@ -137,8 +131,6 @@ AUTH_USER_MODEL = 'accounts.User'
 
 
 # Password validation
-# https://docs.djangoproject.com/en/6.1/ref/settings/#auth-password-validators
-
 AUTH_PASSWORD_VALIDATORS = [
     {
         'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator',
@@ -203,14 +195,15 @@ SIMPLE_JWT = {
 # Refresh-token cookie settings used by accounts.views
 REFRESH_COOKIE_NAME = os.getenv('REFRESH_COOKIE_NAME', 'gah_refresh_token')
 REFRESH_COOKIE_SECURE = env_bool('REFRESH_COOKIE_SECURE', not DEBUG)
-REFRESH_COOKIE_SAMESITE = os.getenv('REFRESH_COOKIE_SAMESITE', 'Lax')
+# Cross-site deployment (Vercel frontend + Render backend) requires SameSite='None'
+REFRESH_COOKIE_SAMESITE = os.getenv('REFRESH_COOKIE_SAMESITE', 'None' if not DEBUG else 'Lax')
 
 
 # CORS Settings
 CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOWED_ORIGINS = env_list(
     'CORS_ALLOWED_ORIGINS', 
-    'http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173'
+    'http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173,https://grande-auto-hut-frontend-sigma.vercel.app'
 )
 
 
@@ -224,14 +217,9 @@ SPECTACULAR_SETTINGS = {
 
 
 # Internationalization
-# https://docs.djangoproject.com/en/6.1/topics/i18n/
-
 LANGUAGE_CODE = 'en-us'
-
 TIME_ZONE = 'Africa/Nairobi'
-
 USE_I18N = True
-
 USE_TZ = True
 
 
