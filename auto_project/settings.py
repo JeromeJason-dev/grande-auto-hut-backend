@@ -261,4 +261,4 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
 
-FRONTEND_URL = "http://localhost:3000"
+FRONTEND_URL = "https://grande-auto-hut-frontend-sigma.vercel.app"
