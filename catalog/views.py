@@ -1,5 +1,6 @@
 from django_filters.rest_framework import DjangoFilterBackend, FilterSet, filters
 from rest_framework import generics, filters as drf_filters
+from rest_framework.permissions import SAFE_METHODS
 from accounts.permissions import AllowAnyReadOnlyOrStaffWrite
 from .models import Category, Brand, Product, ProductFamily
 from .serializers import (
@@ -7,6 +8,12 @@ from .serializers import (
     ProductListSerializer, ProductDetailSerializer, ProductWriteSerializer,
     ProductFamilySerializer,
 )
+
+
+def _is_staff(request):
+    user = getattr(request, "user", None)
+    return bool(user and user.is_authenticated and user.is_staff)
+
 
 # --- Categories ---
 class CategoryListView(generics.ListCreateAPIView):
@@ -39,7 +46,7 @@ class ProductFamilyListView(generics.ListCreateAPIView):
     """
     Create a family here first (e.g. POST {"name": "Aluminum Engine
     Coolant Radiator", "category": <category-id>}), then attach products
-    to it by setting `family` to this family's id on each Product, 
+    to it by setting `family` to this family's id on each Product,
     or passing `product_ids` directly.
     """
     queryset = ProductFamily.objects.filter(is_active=True).select_related("category").prefetch_related("variants__images")
@@ -75,7 +82,6 @@ class ProductFilter(FilterSet):
 
 # --- Products ---
 class ProductListView(generics.ListCreateAPIView):
-    queryset = Product.objects.filter(is_active=True).select_related("category", "brand", "family")
     permission_classes = [AllowAnyReadOnlyOrStaffWrite]
     filter_backends = [DjangoFilterBackend, drf_filters.SearchFilter, drf_filters.OrderingFilter]
     filterset_class = ProductFilter
@@ -83,15 +89,28 @@ class ProductListView(generics.ListCreateAPIView):
     ordering_fields = ["price", "created_at", "name"]
     ordering = ["-created_at"]
 
+    def get_queryset(self):
+        qs = Product.objects.select_related("category", "brand", "family")
+        wants_inactive = self.request.query_params.get("include_inactive", "").lower() in ("1", "true")
+        if wants_inactive and _is_staff(self.request):
+            return qs
+        return qs.filter(is_active=True)
+
     def get_serializer_class(self):
         return ProductWriteSerializer if self.request.method == "POST" else ProductListSerializer
 
 class ProductDetailView(generics.RetrieveUpdateDestroyAPIView):
-    queryset = Product.objects.filter(is_active=True).select_related("category", "brand", "family").prefetch_related(
-        "images", "fitments__vehicle_year__model__make"
-    )
     permission_classes = [AllowAnyReadOnlyOrStaffWrite]
     lookup_field = "slug"
+
+    def get_queryset(self):
+        qs = Product.objects.select_related("category", "brand", "family").prefetch_related(
+            "images", "fitments__vehicle_year__model__make"
+        )
+        # Staff editing must be able to reach inactive products too
+        if self.request.method not in SAFE_METHODS and _is_staff(self.request):
+            return qs
+        return qs.filter(is_active=True)
 
     def get_serializer_class(self):
         return ProductWriteSerializer if self.request.method in ("PUT", "PATCH") else ProductDetailSerializer

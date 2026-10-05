@@ -50,7 +50,6 @@ class ProductSpecificationSerializer(serializers.Serializer):
     Generic label/value row for the spec table on the product detail page.
     Assumes a related model (e.g. ProductSpecification with a FK to Product)
     exposed via a `specifications` related_name/manager on Product.
-    If you don't have that model yet, see the note below the file.
     """
     label = serializers.CharField()
     value = serializers.CharField()
@@ -65,21 +64,29 @@ class FitmentSummarySerializer(serializers.Serializer):
 
 
 class ProductListSerializer(serializers.ModelSerializer):
-    """Compact representation for catalog grids / search results."""
+    """
+    Compact representation for catalog grids / search results.
+
+    It also carries everything the admin edit form needs to pre-fill
+    (ids, description, stock, threshold, is_active). Without these, the
+    edit form opened with blank/default values and "Save changes" would
+    overwrite real data (stock reset to 0, description wiped, etc.).
+    """
     category = serializers.CharField(source="category.name", read_only=True)
     brand = serializers.CharField(source="brand.name", read_only=True)
+    category_id = serializers.UUIDField(read_only=True)
+    brand_id = serializers.UUIDField(read_only=True)
     primary_image = serializers.SerializerMethodField()
-    # Null when the product hasn't been assigned to a family - the
-    # frontend treats that as a "family of one" and doesn't merge it
-    # with anything.
     family_slug = serializers.SerializerMethodField()
     family_name = serializers.SerializerMethodField()
 
     class Meta:
         model = Product
         fields = [
-            "id", "sku", "name", "slug", "category", "brand", "condition",
-            "price", "is_in_stock", "is_low_stock", "primary_image",
+            "id", "sku", "name", "slug", "category", "category_id",
+            "brand", "brand_id", "description", "condition",
+            "price", "stock_quantity", "low_stock_threshold", "is_active",
+            "is_in_stock", "is_low_stock", "primary_image",
             "family_slug", "family_name",
         ]
 
@@ -96,31 +103,31 @@ class ProductListSerializer(serializers.ModelSerializer):
 
 class ProductFamilySerializer(serializers.ModelSerializer):
     slug = serializers.SlugField(max_length=280, required=False, help_text="Auto-generated from name if omitted.")
-    
+
     # Accept category ID on write, expose category name on read
     category = serializers.PrimaryKeyRelatedField(
         queryset=Category.objects.all(), write_only=True, required=True
     )
     category_name = serializers.CharField(source="category.name", read_only=True)
-    
+
     variant_count = serializers.IntegerField(source="variants.count", read_only=True)
-    
-    # New write-only field to assign products during family creation/update
+
+    # Write-only field to assign products during family creation/update
     product_ids = serializers.PrimaryKeyRelatedField(
-        many=True, 
-        queryset=Product.objects.all(), 
-        write_only=True, 
+        many=True,
+        queryset=Product.objects.all(),
+        write_only=True,
         required=False,
         help_text="List of Product UUIDs to assign to this family."
     )
-    
-    # Optional: Display the variants in the family detail view
+
+    # Display the variants in the family detail view
     variants = ProductListSerializer(many=True, read_only=True)
 
     class Meta:
         model = ProductFamily
         fields = [
-            "id", "name", "slug", "category", "category_name", 
+            "id", "name", "slug", "category", "category_name",
             "is_active", "variant_count", "product_ids", "variants"
         ]
 
@@ -137,23 +144,23 @@ class ProductFamilySerializer(serializers.ModelSerializer):
         product_ids = validated_data.pop("product_ids", [])
         if not validated_data.get("slug"):
             validated_data["slug"] = unique_slug(ProductFamily, validated_data["name"])
-        
+
         family = super().create(validated_data)
-        
+
         if product_ids:
             Product.objects.filter(id__in=[p.id for p in product_ids]).update(family=family)
-            
+
         return family
 
     def update(self, instance, validated_data):
         product_ids = validated_data.pop("product_ids", None)
         family = super().update(instance, validated_data)
-        
+
         if product_ids is not None:
             # Unlink products no longer in the list, and assign the new ones
             Product.objects.filter(family=family).exclude(id__in=[p.id for p in product_ids]).update(family=None)
             Product.objects.filter(id__in=[p.id for p in product_ids]).update(family=family)
-            
+
         return family
 
 
@@ -164,10 +171,8 @@ class ProductDetailSerializer(serializers.ModelSerializer):
     fitments = FitmentSummarySerializer(many=True, read_only=True)
     family = ProductFamilySerializer(read_only=True)
 
-    # --- New: extra product-detail fields ---
-    # Each uses getattr(..., default) so this won't crash if the
-    # underlying model field/relation doesn't exist yet - it will just
-    # return null/[] until you add it to Product (see note below).
+    # Extra product-detail fields. Each uses getattr(..., default) so this
+    # won't crash if the underlying model field/relation doesn't exist yet.
     oem_number = serializers.SerializerMethodField()
     weight_kg = serializers.SerializerMethodField()
     warranty_months = serializers.SerializerMethodField()
@@ -196,7 +201,6 @@ class ProductDetailSerializer(serializers.ModelSerializer):
         specs = getattr(obj, "specifications", None)
         if specs is None:
             return []
-        # If it's a related manager (e.g. a ProductSpecification FK), resolve it.
         if hasattr(specs, "all"):
             return ProductSpecificationSerializer(specs.all(), many=True).data
         return specs
@@ -215,9 +219,33 @@ class ProductWriteSerializer(serializers.ModelSerializer):
         fields = [
             "id", "sku", "name", "slug", "category", "brand", "description",
             "condition", "price", "stock_quantity", "low_stock_threshold", "is_active",
-            "family", "oem_number", "weight_kg", "warranty_months",
+            "family",
         ]
         read_only_fields = ["id"]
+
+    def validate_slug(self, value):
+        qs = Product.objects.filter(slug=value)
+        if self.instance is not None:
+            qs = qs.exclude(pk=self.instance.pk)
+        if qs.exists():
+            raise serializers.ValidationError("A product with this slug already exists.")
+        return value
+
+    def validate(self, attrs):
+        instance = self.instance
+        family = attrs.get("family", instance.family if instance else None)
+        condition = attrs.get(
+            "condition", instance.condition if instance else Product.Condition.AFTERMARKET
+        )
+        if family is not None:
+            clash = Product.objects.filter(family=family, condition=condition)
+            if instance is not None:
+                clash = clash.exclude(pk=instance.pk)
+            if clash.exists():
+                raise serializers.ValidationError(
+                    {"condition": "This product family already has a variant with that condition."}
+                )
+        return attrs
 
     def create(self, validated_data):
         if not validated_data.get("slug"):
