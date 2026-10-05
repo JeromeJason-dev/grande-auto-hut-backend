@@ -68,14 +68,15 @@ class ProductListSerializer(serializers.ModelSerializer):
     Compact representation for catalog grids / search results.
 
     It also carries everything the admin edit form needs to pre-fill
-    (ids, description, stock, threshold, is_active). Without these, the
-    edit form opened with blank/default values and "Save changes" would
-    overwrite real data (stock reset to 0, description wiped, etc.).
+    (ids, description, stock, threshold, is_active, family). Without these,
+    the edit form opened with blank/default values and "Save changes" would
+    overwrite real data (stock reset to 0, description wiped, family detached).
     """
     category = serializers.CharField(source="category.name", read_only=True)
     brand = serializers.CharField(source="brand.name", read_only=True)
     category_id = serializers.UUIDField(read_only=True)
     brand_id = serializers.UUIDField(read_only=True)
+    family_id = serializers.UUIDField(read_only=True)
     primary_image = serializers.SerializerMethodField()
     family_slug = serializers.SerializerMethodField()
     family_name = serializers.SerializerMethodField()
@@ -87,7 +88,7 @@ class ProductListSerializer(serializers.ModelSerializer):
             "brand", "brand_id", "description", "condition",
             "price", "stock_quantity", "low_stock_threshold", "is_active",
             "is_in_stock", "is_low_stock", "primary_image",
-            "family_slug", "family_name",
+            "family_id", "family_slug", "family_name",
         ]
 
     def get_primary_image(self, obj):
