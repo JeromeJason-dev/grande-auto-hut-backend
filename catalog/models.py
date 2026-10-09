@@ -35,39 +35,6 @@ class Brand(models.Model):
         return self.name
 
 
-class ProductFamily(models.Model):
-    """
-    Represents one physical part, independent of which condition it's
-    sold in. A family groups its Product rows (genuine / aftermarket /
-    refurbished) so the storefront can render them as a single card with
-    a condition switcher, and a single detail page listing every
-    price/SKU/stock combination.
-
-    Brand is deliberately NOT here — genuine vs. aftermarket variants of
-    the same part are usually different brands (e.g. "Denso" vs "Generic
-    Aftermarket" in the coolant radiator example), so brand stays on the
-    Product row. Fitment (vehicle_years) also stays on Product, since it's
-    declared per-row today; in practice it'll usually be identical across
-    a family's variants.
-    """
-
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    name = models.CharField(max_length=255)
-    slug = models.SlugField(max_length=280, unique=True)
-    category = models.ForeignKey(
-        Category, related_name="product_families", on_delete=models.PROTECT
-    )
-    is_active = models.BooleanField(default=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        verbose_name_plural = "Product families"
-        ordering = ["name"]
-
-    def __str__(self):
-        return self.name
-
-
 class Product(models.Model):
     class Condition(models.TextChoices):
         GENUINE = "genuine", "Genuine (OEM)"
@@ -82,14 +49,6 @@ class Product(models.Model):
     brand = models.ForeignKey(Brand, related_name="products", on_delete=models.PROTECT)
     description = models.TextField(blank=True)
     condition = models.CharField(max_length=20, choices=Condition.choices, default=Condition.AFTERMARKET)
-
-    family = models.ForeignKey(
-        ProductFamily,
-        related_name="variants",
-        null=True,
-        blank=True,
-        on_delete=models.SET_NULL,
-    )
 
     price = models.DecimalField(max_digits=10, decimal_places=2, validators=[MinValueValidator(0)])
     stock_quantity = models.PositiveIntegerField(default=0)
@@ -111,12 +70,6 @@ class Product(models.Model):
         indexes = [
             models.Index(fields=["slug"]),
             models.Index(fields=["sku"]),
-        ]
-        constraints = [
-            models.UniqueConstraint(
-                fields=["family", "condition"],
-                name="unique_condition_per_family",
-            ),
         ]
 
     def __str__(self):

@@ -2,11 +2,10 @@ from django_filters.rest_framework import DjangoFilterBackend, FilterSet, filter
 from rest_framework import generics, filters as drf_filters
 from rest_framework.permissions import SAFE_METHODS
 from accounts.permissions import AllowAnyReadOnlyOrStaffWrite
-from .models import Category, Brand, Product, ProductFamily
+from .models import Category, Brand, Product
 from .serializers import (
     CategorySerializer, BrandSerializer,
     ProductListSerializer, ProductDetailSerializer, ProductWriteSerializer,
-    ProductFamilySerializer,
 )
 
 
@@ -21,6 +20,7 @@ class CategoryListView(generics.ListCreateAPIView):
     serializer_class = CategorySerializer
     permission_classes = [AllowAnyReadOnlyOrStaffWrite]
 
+
 class CategoryDetailView(generics.RetrieveAPIView):
     queryset = Category.objects.filter(is_active=True)
     serializer_class = CategorySerializer
@@ -34,30 +34,12 @@ class BrandListView(generics.ListCreateAPIView):
     serializer_class = BrandSerializer
     permission_classes = [AllowAnyReadOnlyOrStaffWrite]
 
+
 class BrandDetailView(generics.RetrieveAPIView):
     queryset = Brand.objects.filter(is_active=True)
     serializer_class = BrandSerializer
     permission_classes = [AllowAnyReadOnlyOrStaffWrite]
     lookup_field = "pk"  # Matches <uuid:pk> in urls.py
-
-
-# --- Product Families ---
-class ProductFamilyListView(generics.ListCreateAPIView):
-    """
-    Create a family here first (e.g. POST {"name": "Aluminum Engine
-    Coolant Radiator", "category": <category-id>}), then attach products
-    to it by setting `family` to this family's id on each Product,
-    or passing `product_ids` directly.
-    """
-    queryset = ProductFamily.objects.filter(is_active=True).select_related("category").prefetch_related("variants__images")
-    serializer_class = ProductFamilySerializer
-    permission_classes = [AllowAnyReadOnlyOrStaffWrite]
-
-class ProductFamilyDetailView(generics.RetrieveUpdateDestroyAPIView):
-    queryset = ProductFamily.objects.filter(is_active=True).select_related("category").prefetch_related("variants__images")
-    serializer_class = ProductFamilySerializer
-    permission_classes = [AllowAnyReadOnlyOrStaffWrite]
-    lookup_field = "pk"
 
 
 # --- Products Filter ---
@@ -68,16 +50,13 @@ class ProductFilter(FilterSet):
     brand = filters.CharFilter(field_name="brand__slug")
     condition = filters.ChoiceFilter(choices=Product.Condition.choices)
     in_stock = filters.BooleanFilter(method="filter_in_stock")
-    # Lets the frontend fetch every variant that belongs to one family:
-    # GET /products/?family_slug=aluminum-engine-coolant-radiator
-    family_slug = filters.CharFilter(field_name="family__slug")
 
     def filter_in_stock(self, queryset, name, value):
         return queryset.filter(stock_quantity__gt=0) if value else queryset.filter(stock_quantity=0)
 
     class Meta:
         model = Product
-        fields = ["category", "brand", "condition", "min_price", "max_price", "in_stock", "family_slug"]
+        fields = ["category", "brand", "condition", "min_price", "max_price", "in_stock"]
 
 
 # --- Products ---
@@ -90,7 +69,7 @@ class ProductListView(generics.ListCreateAPIView):
     ordering = ["-created_at"]
 
     def get_queryset(self):
-        qs = Product.objects.select_related("category", "brand", "family")
+        qs = Product.objects.select_related("category", "brand")
         wants_inactive = self.request.query_params.get("include_inactive", "").lower() in ("1", "true")
         if wants_inactive and _is_staff(self.request):
             return qs
@@ -99,12 +78,13 @@ class ProductListView(generics.ListCreateAPIView):
     def get_serializer_class(self):
         return ProductWriteSerializer if self.request.method == "POST" else ProductListSerializer
 
+
 class ProductDetailView(generics.RetrieveUpdateDestroyAPIView):
     permission_classes = [AllowAnyReadOnlyOrStaffWrite]
     lookup_field = "slug"
 
     def get_queryset(self):
-        qs = Product.objects.select_related("category", "brand", "family").prefetch_related(
+        qs = Product.objects.select_related("category", "brand").prefetch_related(
             "images", "fitments__vehicle_year__model__make"
         )
         # Staff editing must be able to reach inactive products too
