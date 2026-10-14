@@ -42,6 +42,16 @@ class VehicleYearSerializer(serializers.ModelSerializer):
         model = VehicleYear
         fields = ["id", "year"]
 
+    def validate_year(self, value):
+        model = self.context.get("model") or getattr(self.instance, "model", None)
+        if model is not None:
+            duplicates = VehicleYear.objects.filter(model=model, year=value)
+            if self.instance is not None:
+                duplicates = duplicates.exclude(pk=self.instance.pk)
+            if duplicates.exists():
+                raise serializers.ValidationError("This year already exists for this model.")
+        return value
+
 
 class FitmentWriteSerializer(serializers.ModelSerializer):
     """Staff/admin: attach a product to a vehicle year."""

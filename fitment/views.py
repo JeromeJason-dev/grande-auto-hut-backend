@@ -64,8 +64,37 @@ class VehicleYearListView(generics.ListCreateAPIView):
         model = self.get_model()
         return VehicleYear.objects.filter(model=model)
 
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context["model"] = self.get_model()
+        return context
+
     def perform_create(self, serializer):
         serializer.save(model=self.get_model())
+
+
+class VehicleMakeDetailView(generics.RetrieveUpdateDestroyAPIView):
+    """PATCH (staff/admin only): rename a make. DELETE: remove it, along with
+    its models, years and fitments (cascade)."""
+    queryset = VehicleMake.objects.all()
+    serializer_class = VehicleMakeSerializer
+    permission_classes = [AllowAnyReadOnlyOrStaffWrite]
+
+
+class VehicleModelDetailView(generics.RetrieveUpdateDestroyAPIView):
+    """PATCH (staff/admin only): rename a model. DELETE: remove it, along with
+    its years and fitments (cascade)."""
+    queryset = VehicleModel.objects.all()
+    serializer_class = VehicleModelSerializer
+    permission_classes = [AllowAnyReadOnlyOrStaffWrite]
+
+
+class VehicleYearDetailView(generics.RetrieveUpdateDestroyAPIView):
+    """PATCH (staff/admin only): change a model-year. DELETE: remove it, along
+    with its fitments (cascade)."""
+    queryset = VehicleYear.objects.all()
+    serializer_class = VehicleYearSerializer
+    permission_classes = [AllowAnyReadOnlyOrStaffWrite]
 
 
 class FitmentProductSearchView(generics.ListAPIView):
