@@ -12,9 +12,10 @@ from .models import Cart, CartItem, Order
 from .serializers import (
     CartSerializer, AddCartItemSerializer, UpdateCartItemSerializer,
     CheckoutSerializer, OrderListSerializer, OrderDetailSerializer, OrderStatusUpdateSerializer,
+    OrderPaymentStatusUpdateSerializer,
 )
 from .services import (
-    get_or_create_cart, checkout, update_status,
+    get_or_create_cart, checkout, update_status, update_payment_status,
     CheckoutError, InvalidTransitionError,
 )
 
@@ -150,5 +151,25 @@ class OrderStatusUpdateView(views.APIView):
                 note=serializer.validated_data.get("note", ""),
             )
         except (InvalidTransitionError, CheckoutError) as exc:
+            raise ValidationError(str(exc))
+        return Response(OrderDetailSerializer(order).data)
+
+
+class OrderPaymentStatusUpdateView(views.APIView):
+    """PATCH /api/orders/{id}/payment-status/  body: {"payment_status": "paid|pending|failed", "note": ""}"""
+    permission_classes = [IsStaffOrAdmin]
+
+    def patch(self, request, id):
+        order = get_object_or_404(Order.objects.select_related("user"), id=id)
+        serializer = OrderPaymentStatusUpdateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            order = update_payment_status(
+                order,
+                serializer.validated_data["payment_status"],
+                user=request.user,
+                note=serializer.validated_data.get("note", ""),
+            )
+        except CheckoutError as exc:
             raise ValidationError(str(exc))
         return Response(OrderDetailSerializer(order).data)

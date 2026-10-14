@@ -2,6 +2,7 @@ from django.urls import path
 from .views import (
     CartView, CartItemCreateView, CartItemDetailView,
     CheckoutView, OrderListView, OrderDetailView, OrderStatusUpdateView,
+    OrderPaymentStatusUpdateView,
 )
 
 urlpatterns = [
@@ -13,4 +14,5 @@ urlpatterns = [
     path("orders/", OrderListView.as_view(), name="order-list"),
     path("orders/<str:id>/", OrderDetailView.as_view(), name="order-detail"),
     path("orders/<uuid:id>/status/", OrderStatusUpdateView.as_view(), name="order-status-update"),
+    path("orders/<uuid:id>/payment-status/", OrderPaymentStatusUpdateView.as_view(), name="order-payment-status-update"),
 ]
