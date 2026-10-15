@@ -257,6 +257,17 @@ MEDIA_URL = 'media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
 
+# Logging: print server errors (with full traceback) 
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "handlers": {"console": {"class": "logging.StreamHandler"}},
+    "loggers": {
+        "django.request": {"handlers": ["console"], "level": "ERROR", "propagate": False},
+    },
+}
+
+
 # M-Pesa Daraja Settings
 MPESA_ENV = os.getenv('MPESA_ENV', 'sandbox')  # sandbox | production
 MPESA_CONSUMER_KEY = os.getenv('MPESA_CONSUMER_KEY')
