@@ -94,9 +94,7 @@ LOCAL_APPS = [
 INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS
 
 if USE_CLOUDINARY:
-    # 'cloudinary_storage' must come before 'django.contrib.staticfiles'
-    INSTALLED_APPS.insert(INSTALLED_APPS.index('django.contrib.staticfiles'), 'cloudinary_storage')
-    INSTALLED_APPS.insert(INSTALLED_APPS.index('django.contrib.staticfiles') + 1, 'cloudinary')
+    INSTALLED_APPS.append('cloudinary')
 
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',  
