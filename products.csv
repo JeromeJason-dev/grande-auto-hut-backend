@@ -1,0 +1,6 @@
+sku,name,category,brand,description,condition,price,stock_quantity,low_stock_threshold
+BRK-001,Front Brake Pads (Toyota Corolla),Brakes,Bosch,Ceramic front brake pads,aftermarket,3500.00,40,5
+OIL-001,Engine Oil 5W-30 (4L),Engine Oil,Castrol,Fully synthetic engine oil,genuine,4200.00,120,10
+FLT-001,Oil Filter,Filters,Toyota,Genuine oil filter,genuine,950.00,80,10
+BAT-001,Car Battery 65Ah,Batteries,Chloride Exide,12V maintenance-free battery,genuine,11500.00,15,3
+SPK-001,Spark Plugs (Set of 4),Ignition,NGK,Iridium spark plugs,aftermarket,2800.00,35,5
