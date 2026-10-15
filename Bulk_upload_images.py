@@ -15,8 +15,8 @@ import sys
 import requests
 
 API = "https://grande-auto-hut-backend.onrender.com/api"
-EMAIL = input("Jason@gmail.com").strip()
-PASSWORD = getpass.getpass("Jason@123")
+EMAIL = input("Staff/Admin email: ").strip()
+PASSWORD = getpass.getpass("Password: ")
 FOLDER = "product_images"
 EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 
