@@ -1,11 +1,14 @@
 from django_filters.rest_framework import DjangoFilterBackend, FilterSet, filters
+from django.shortcuts import get_object_or_404
 from rest_framework import generics, filters as drf_filters
+from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.permissions import SAFE_METHODS
-from accounts.permissions import AllowAnyReadOnlyOrStaffWrite
+from accounts.permissions import AllowAnyReadOnlyOrStaffWrite, IsStaffOrAdmin
 from .models import Category, Brand, Product
 from .serializers import (
     CategorySerializer, BrandSerializer,
     ProductListSerializer, ProductDetailSerializer, ProductWriteSerializer,
+    ProductImageSerializer,
 )
 
 
@@ -94,3 +97,15 @@ class ProductDetailView(generics.RetrieveUpdateDestroyAPIView):
 
     def get_serializer_class(self):
         return ProductWriteSerializer if self.request.method in ("PUT", "PATCH") else ProductDetailSerializer
+
+
+# --- Product images ---
+class ProductImageUploadView(generics.CreateAPIView):
+    """Staff/Admin only: upload one image to a product (multipart/form-data)."""
+    permission_classes = [IsStaffOrAdmin]
+    serializer_class = ProductImageSerializer
+    parser_classes = [MultiPartParser, FormParser]
+
+    def perform_create(self, serializer):
+        product = get_object_or_404(Product, slug=self.kwargs["slug"])
+        serializer.save(product=product)

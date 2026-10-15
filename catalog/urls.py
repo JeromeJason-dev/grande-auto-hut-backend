@@ -3,6 +3,7 @@ from .views import (
     CategoryListView, CategoryDetailView,
     BrandListView, BrandDetailView,
     ProductListView, ProductDetailView,
+    ProductImageUploadView,
 )
 
 urlpatterns = [
@@ -17,4 +18,5 @@ urlpatterns = [
     # --- Products ---
     path("products/", ProductListView.as_view(), name="product-list"),
     path("products/<slug:slug>/", ProductDetailView.as_view(), name="product-detail"),
+    path("products/<slug:slug>/images/", ProductImageUploadView.as_view(), name="product-image-upload"),
 ]

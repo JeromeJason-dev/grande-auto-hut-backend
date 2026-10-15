@@ -53,6 +53,12 @@ DEBUG = env_bool('DJANGO_DEBUG', env_bool('DEBUG', True))
 ALLOWED_HOSTS = ['*']
 
 
+# Cloudinary (permanent product-image storage).
+CLOUDINARY_CLOUD_NAME = os.getenv('CLOUDINARY_CLOUD_NAME')
+CLOUDINARY_API_KEY = os.getenv('CLOUDINARY_API_KEY')
+CLOUDINARY_API_SECRET = os.getenv('CLOUDINARY_API_SECRET')
+USE_CLOUDINARY = all([CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET])
+
 # Application definition
 DJANGO_APPS = [
     'django.contrib.admin',
@@ -86,6 +92,11 @@ LOCAL_APPS = [
 ]
 
 INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS
+
+if USE_CLOUDINARY:
+    # 'cloudinary_storage' must come before 'django.contrib.staticfiles'
+    INSTALLED_APPS.insert(INSTALLED_APPS.index('django.contrib.staticfiles'), 'cloudinary_storage')
+    INSTALLED_APPS.insert(INSTALLED_APPS.index('django.contrib.staticfiles') + 1, 'cloudinary')
 
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',  
@@ -227,9 +238,22 @@ USE_TZ = True
 STATIC_URL = 'static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 STORAGES = {
-    "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+    "default": {
+        "BACKEND": (
+            "cloudinary_storage.storage.MediaCloudinaryStorage"
+            if USE_CLOUDINARY
+            else "django.core.files.storage.FileSystemStorage"
+        )
+    },
     "staticfiles": {"BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage"},
 }
+
+if USE_CLOUDINARY:
+    CLOUDINARY_STORAGE = {
+        'CLOUD_NAME': CLOUDINARY_CLOUD_NAME,
+        'API_KEY': CLOUDINARY_API_KEY,
+        'API_SECRET': CLOUDINARY_API_SECRET,
+    }
 
 MEDIA_URL = 'media/'
 MEDIA_ROOT = BASE_DIR / 'media'
