@@ -13,8 +13,8 @@ import requests
 
 # ---------------- SETTINGS ----------------
 API = "https://grande-auto-hut-backend.onrender.com/api"      
-EMAIL = "Jason@gmail.com"            
-PASSWORD = "Jason@123"
+EMAIL = "Njeri@gmail.com"            
+PASSWORD = "Njeri@123"
 CSV_FILE = "products.csv"
 # ------------------------------------------
 
