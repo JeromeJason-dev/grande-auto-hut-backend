@@ -18,10 +18,11 @@ class TicketMessageCreateSerializer(serializers.Serializer):
 
 class TicketListSerializer(serializers.ModelSerializer):
     message_count = serializers.IntegerField(source="messages.count", read_only=True)
+    customer_email = serializers.CharField(source="user.email", read_only=True)
 
     class Meta:
         model = Ticket
-        fields = ["id", "subject", "category", "status", "order", "message_count", "created_at", "updated_at"]
+        fields = ["id", "subject", "category", "status", "order", "customer_email", "message_count", "created_at", "updated_at"]
 
 
 class TicketDetailSerializer(serializers.ModelSerializer):

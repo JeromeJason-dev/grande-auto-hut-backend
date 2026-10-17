@@ -1,6 +1,7 @@
 import logging
 from decimal import Decimal
 from django.db import transaction
+from django.utils import timezone
 from inventory.services import adjust_stock, InsufficientStockError
 from inventory.models import InventoryTransaction
 from .models import Cart, CartItem, Order, OrderItem, OrderStatusHistory
@@ -91,6 +92,20 @@ def checkout(cart: Cart, user, address_data: dict, payment_method: str) -> Order
     return order
 
 
+DEFAULT_CANCEL_NOTE = "Order cancelled."
+
+
+def _lock_order(order: Order) -> Order:
+    """
+    Re-read the order under a row lock (must be called inside a transaction).
+
+    Without this, two admins acting on the same order at the same moment both
+    pass the state-machine check on a stale copy, and a double cancel would
+    restock the parts twice.
+    """
+    return Order.objects.select_for_update(of=("self",)).get(pk=order.pk)
+
+
 def assert_valid_transition(order: Order, new_status: str):
     allowed = Order.TRANSITIONS.get(order.status, set())
     if new_status not in allowed:
@@ -101,6 +116,7 @@ def assert_valid_transition(order: Order, new_status: str):
 
 @transaction.atomic
 def confirm_order(order: Order, user=None, note="Order confirmed.") -> Order:
+    order = _lock_order(order)
     assert_valid_transition(order, Order.Status.CONFIRMED)
     for item in order.items.select_related("product"):
         try:
@@ -128,12 +144,15 @@ def confirm_order(order: Order, user=None, note="Order confirmed.") -> Order:
 
 
 @transaction.atomic
-def cancel_order(order: Order, user=None, note="Order cancelled.") -> Order:
+def cancel_order(order: Order, user=None, note=DEFAULT_CANCEL_NOTE) -> Order:
+    from payments.models import Payment
+
+    order = _lock_order(order)
     assert_valid_transition(order, Order.Status.CANCELLED)
+    # Stock is only deducted once an order is confirmed, so only those states give it back.
     was_stock_reserved = order.status in (
         Order.Status.CONFIRMED,
         Order.Status.PROCESSING,
-        Order.Status.DELIVERED,
         Order.Status.IN_TRANSIT,
     )
 
@@ -141,10 +160,10 @@ def cancel_order(order: Order, user=None, note="Order cancelled.") -> Order:
     order.save(update_fields=["status", "updated_at"])
     _record_history(order, Order.Status.CANCELLED, user=user, note=note)
 
-    from notifications.services import notify
-    notify(
-        order.user, "order_update", f"Order {order.order_number} cancelled",
-        note or f"Your order {order.order_number} has been cancelled.",
+    # A cancelled order can't still be awaiting payment. Without this a pending
+    # M-Pesa attempt would sit in the dashboard's "Pending M-Pesa" count forever.
+    order.payments.filter(status=Payment.Status.PENDING).update(
+        status=Payment.Status.FAILED, updated_at=timezone.now()
     )
 
     if was_stock_reserved:
@@ -157,17 +176,27 @@ def cancel_order(order: Order, user=None, note="Order cancelled.") -> Order:
                 note=f"Order {order.order_number} cancelled",
                 user=user,
             )
+
+    # The default note is just the history label; only a real reason goes to the customer.
+    message = f"Your order {order.order_number} has been cancelled."
+    if note and note != DEFAULT_CANCEL_NOTE:
+        message += f" Reason: {note}"
+
+    from notifications.services import notify
+    notify(order.user, "order_update", f"Order {order.order_number} cancelled", message)
     return order
 
 
 @transaction.atomic
 def update_status(order: Order, new_status: str, user=None, note="") -> Order:
+    order = _lock_order(order)
+
     # 1. Handle specialized target states that require separate business flows or custom logic
     if new_status == Order.Status.CONFIRMED:
         return confirm_order(order, user=user, note=note or "Order confirmed.")
 
     if new_status == Order.Status.CANCELLED:
-        return cancel_order(order, user=user, note=note or "Order cancelled.")
+        return cancel_order(order, user=user, note=note or DEFAULT_CANCEL_NOTE)
 
     # 2. Enforce structural state machine validation first (prevents illegal jumps)
     assert_valid_transition(order, new_status)

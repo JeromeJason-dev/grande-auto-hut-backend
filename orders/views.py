@@ -6,6 +6,7 @@ from django.shortcuts import get_object_or_404
 from rest_framework import generics, permissions, status, views
 from rest_framework.response import Response
 from rest_framework.exceptions import ValidationError
+from rest_framework.pagination import PageNumberPagination
 from django_filters.rest_framework import DjangoFilterBackend
 from accounts.permissions import IsStaffOrAdmin
 from .models import Cart, CartItem, Order
@@ -89,8 +90,20 @@ class CheckoutView(views.APIView):
         return Response(OrderDetailSerializer(order).data, status=status.HTTP_201_CREATED)
 
 
+class OrderPagination(PageNumberPagination):
+    """
+    DRF ignores ?page_size= unless the paginator opts in. The admin orders page
+    asks for page_size=100, so without this it silently got only the newest 20
+    orders and couldn't reach (or cancel) anything older.
+    """
+    page_size = 20
+    page_size_query_param = "page_size"
+    max_page_size = 100
+
+
 class OrderListView(generics.ListAPIView):
     serializer_class = OrderListSerializer
+    pagination_class = OrderPagination
     permission_classes = [permissions.IsAuthenticated]
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ["status"]
