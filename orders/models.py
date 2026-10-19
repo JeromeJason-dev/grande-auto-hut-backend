@@ -65,6 +65,7 @@ class Order(models.Model):
 
     class PaymentMethod(models.TextChoices):
         MPESA = "mpesa", "M-Pesa"
+        CARD = "card", "Card"
         COD = "cod", "Pay on Delivery"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)

@@ -23,5 +23,14 @@ class MpesaInitiateSerializer(serializers.Serializer):
 class PaymentSerializer(serializers.ModelSerializer):
     class Meta:
         model = Payment
-        fields = ["id", "order", "method", "status", "amount", "phone_number", "mpesa_receipt_number", "created_at"]
+        fields = ["id", "order", "method", "status", "amount", "phone_number", "mpesa_receipt_number", "card_brand", "card_last4", "created_at"]
         read_only_fields = fields
+
+
+class CardInitiateSerializer(serializers.Serializer):
+    order_id = serializers.UUIDField()
+
+
+class CardVerifySerializer(serializers.Serializer):
+    order_id = serializers.UUIDField()
+    reference = serializers.CharField(max_length=100, required=False, allow_blank=True)

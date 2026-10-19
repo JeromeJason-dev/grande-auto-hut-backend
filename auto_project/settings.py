@@ -277,9 +277,15 @@ MPESA_PASSKEY = os.getenv('MPESA_PASSKEY')
 MPESA_CALLBACK_BASE_URL = os.getenv("MPESA_CALLBACK_BASE_URL")
 
 
+# Card payments (Paystack hosted checkout)
+PAYSTACK_SECRET_KEY = os.getenv('PAYSTACK_SECRET_KEY')  # sk_test_... / sk_live_...
+PAYSTACK_CURRENCY = os.getenv('PAYSTACK_CURRENCY', 'KES')
+PAYSTACK_BASE_URL = os.getenv('PAYSTACK_BASE_URL', 'https://api.paystack.co')
+
+
 # Default Primary Key Field Type
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
 
-FRONTEND_URL = "https://grande-auto-hut-frontend-sigma.vercel.app"
+FRONTEND_URL = os.getenv("FRONTEND_URL", "https://grande-auto-hut-frontend-sigma.vercel.app").rstrip("/")

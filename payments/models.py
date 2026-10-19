@@ -10,7 +10,10 @@ class Payment(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     order = models.ForeignKey("orders.Order", related_name="payments", on_delete=models.CASCADE)
-    method = models.CharField(max_length=20, choices=[("mpesa", "M-Pesa"), ("cod", "Pay on Delivery")])
+    method = models.CharField(
+        max_length=20,
+        choices=[("mpesa", "M-Pesa"), ("card", "Card"), ("cod", "Pay on Delivery")],
+    )
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
     amount = models.DecimalField(max_digits=10, decimal_places=2)
     phone_number = models.CharField(max_length=15, blank=True)
@@ -20,6 +23,10 @@ class Payment(models.Model):
     mpesa_checkout_request_id = models.CharField(max_length=100, blank=True, unique=True, null=True)
     mpesa_receipt_number = models.CharField(max_length=50, blank=True)
     raw_callback = models.JSONField(null=True, blank=True)
+
+    card_reference = models.CharField(max_length=100, blank=True, unique=True, null=True)
+    card_brand = models.CharField(max_length=30, blank=True)
+    card_last4 = models.CharField(max_length=4, blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
