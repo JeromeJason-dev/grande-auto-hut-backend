@@ -153,14 +153,6 @@ def _get_owned_order(request, order_id):
 
 
 class CardInitiateView(views.APIView):
-    """
-    POST /api/payments/card/initiate/   Body: {"order_id": "..."}
-    Creates a Paystack transaction for a pending, card-method order the user
-    owns and returns {"payment_url": ...}. The frontend redirects the browser
-    there; the customer enters card details on Paystack's page. Nothing is
-    marked paid here - only the webhook/verify step does that.
-    Calling it again (e.g. after a declined card) starts a fresh attempt.
-    """
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request):
@@ -197,7 +189,12 @@ class CardInitiateView(views.APIView):
             card_reference=data.get("reference", reference),
         )
         return Response(
-            {"payment_url": data["authorization_url"], "payment": PaymentSerializer(payment).data},
+            {
+                "payment_url": data["authorization_url"],
+                "access_code": data.get("access_code", ""),
+                "reference": payment.card_reference,
+                "payment": PaymentSerializer(payment).data,
+            },
             status=status.HTTP_202_ACCEPTED,
         )
 
