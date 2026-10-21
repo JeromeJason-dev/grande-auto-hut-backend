@@ -107,6 +107,7 @@ class VehicleYearDetailView(generics.RetrieveUpdateDestroyAPIView):
 class FitmentProductSearchView(generics.ListAPIView):
     serializer_class = ProductListSerializer
     permission_classes = [permissions.AllowAny]
+    pagination_class = None  
 
     def get_queryset(self):
         params = FitmentSearchSerializer(data=self.request.query_params)
