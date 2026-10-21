@@ -1,5 +1,6 @@
 from django.utils.text import slugify
 from rest_framework import serializers
+from catalog.models import Product
 from .models import VehicleMake, VehicleModel, VehicleYear, Fitment
 
 
@@ -59,6 +60,46 @@ class FitmentWriteSerializer(serializers.ModelSerializer):
     class Meta:
         model = Fitment
         fields = ["id", "product", "vehicle_year", "notes"]
+        # We validate uniqueness ourselves for a friendlier message.
+        validators = []
+
+    def validate(self, attrs):
+        product = attrs.get("product", getattr(self.instance, "product", None))
+        vehicle_year = attrs.get("vehicle_year", getattr(self.instance, "vehicle_year", None))
+        duplicates = Fitment.objects.filter(product=product, vehicle_year=vehicle_year)
+        if self.instance is not None:
+            duplicates = duplicates.exclude(pk=self.instance.pk)
+        if duplicates.exists():
+            raise serializers.ValidationError("This product is already assigned to that vehicle.")
+        return attrs
+
+
+class FitmentReadSerializer(serializers.ModelSerializer):
+    """Staff/admin: a fitment row with human-readable vehicle + product info."""
+    product_name = serializers.CharField(source="product.name", read_only=True)
+    product_sku = serializers.CharField(source="product.sku", read_only=True)
+    make = serializers.CharField(source="vehicle_year.model.make.name", read_only=True)
+    make_slug = serializers.CharField(source="vehicle_year.model.make.slug", read_only=True)
+    model = serializers.CharField(source="vehicle_year.model.name", read_only=True)
+    model_slug = serializers.CharField(source="vehicle_year.model.slug", read_only=True)
+    year = serializers.IntegerField(source="vehicle_year.year", read_only=True)
+
+    class Meta:
+        model = Fitment
+        fields = [
+            "id", "product", "product_name", "product_sku",
+            "vehicle_year", "make", "make_slug", "model", "model_slug", "year",
+            "notes", "created_at",
+        ]
+
+
+class FitmentBulkSerializer(serializers.Serializer):
+    """Assign one product to many vehicle years in a single request."""
+    product = serializers.PrimaryKeyRelatedField(queryset=Product.objects.all())
+    vehicle_years = serializers.PrimaryKeyRelatedField(
+        queryset=VehicleYear.objects.all(), many=True, allow_empty=False
+    )
+    notes = serializers.CharField(max_length=255, required=False, allow_blank=True, default="")
 
 
 class FitmentSearchSerializer(serializers.Serializer):

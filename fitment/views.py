@@ -1,19 +1,24 @@
 from django.db.models import Q
-from rest_framework import generics, viewsets, permissions
+from django.db import transaction
+from rest_framework import generics, viewsets, permissions, status
+from rest_framework.decorators import action
+from rest_framework.response import Response
 from rest_framework.exceptions import NotFound
-from accounts.permissions import AllowAnyReadOnlyOrStaffWrite
+from accounts.permissions import AllowAnyReadOnlyOrStaffWrite, IsStaffOrAdmin
 from catalog.serializers import ProductListSerializer
 from catalog.models import Product
 from .models import VehicleMake, VehicleModel, VehicleYear, Fitment
 from .serializers import (
     VehicleMakeSerializer, VehicleModelSerializer, VehicleYearSerializer,
-    FitmentWriteSerializer, FitmentSearchSerializer, unique_slug,
+    FitmentWriteSerializer, FitmentReadSerializer, FitmentBulkSerializer,
+    FitmentSearchSerializer, unique_slug,
 )
 
 
 class VehicleMakeListView(generics.ListCreateAPIView):
     """GET: public list of active vehicle makes.
     POST (staff/admin only): create a new make, e.g. {"name": "Toyota"}."""
+    pagination_class = None  # dropdowns need the full list, not page 1 of 20
     queryset = VehicleMake.objects.filter(is_active=True)
     serializer_class = VehicleMakeSerializer
     permission_classes = [AllowAnyReadOnlyOrStaffWrite]
@@ -22,6 +27,7 @@ class VehicleMakeListView(generics.ListCreateAPIView):
 class VehicleModelListView(generics.ListCreateAPIView):
     """GET: public list of active models for the make in the URL.
     POST (staff/admin only): create a new model under that make."""
+    pagination_class = None  # dropdowns need the full list, not page 1 of 20
     serializer_class = VehicleModelSerializer
     permission_classes = [AllowAnyReadOnlyOrStaffWrite]
 
@@ -47,6 +53,7 @@ class VehicleModelListView(generics.ListCreateAPIView):
 class VehicleYearListView(generics.ListCreateAPIView):
     """GET: public list of years for the make/model in the URL.
     POST (staff/admin only): create a new model-year."""
+    pagination_class = None  # dropdowns need the full list, not page 1 of 20
     serializer_class = VehicleYearSerializer
     permission_classes = [AllowAnyReadOnlyOrStaffWrite]
 
@@ -128,6 +135,66 @@ class FitmentProductSearchView(generics.ListAPIView):
 
 
 class FitmentViewSet(viewsets.ModelViewSet):
-    queryset = Fitment.objects.select_related("product", "vehicle_year")
-    serializer_class = FitmentWriteSerializer
-    permission_classes = [AllowAnyReadOnlyOrStaffWrite]
+    permission_classes = [IsStaffOrAdmin]
+    pagination_class = None
+    filter_backends = []
+
+    def get_queryset(self):
+        qs = Fitment.objects.select_related(
+            "product", "vehicle_year__model__make"
+        ).order_by("vehicle_year__model__make__name", "vehicle_year__model__name", "-vehicle_year__year")
+        p = self.request.query_params
+        if p.get("product"):
+            qs = qs.filter(product_id=p["product"])
+        if p.get("vehicle_year"):
+            qs = qs.filter(vehicle_year_id=p["vehicle_year"])
+        if p.get("make"):
+            qs = qs.filter(vehicle_year__model__make__slug=p["make"])
+        if p.get("model"):
+            qs = qs.filter(vehicle_year__model__slug=p["model"])
+        if p.get("year"):
+            qs = qs.filter(vehicle_year__year=p["year"])
+        return qs
+
+    def get_serializer_class(self):
+        if self.action == "bulk":
+            return FitmentBulkSerializer
+        if self.action in ("list", "retrieve"):
+            return FitmentReadSerializer
+        return FitmentWriteSerializer
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        fitment = serializer.save()
+        return Response(FitmentReadSerializer(fitment).data, status=status.HTTP_201_CREATED)
+
+    def update(self, request, *args, **kwargs):
+        partial = kwargs.pop("partial", False)
+        serializer = self.get_serializer(self.get_object(), data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        fitment = serializer.save()
+        return Response(FitmentReadSerializer(fitment).data)
+
+    @action(detail=False, methods=["post"], url_path="bulk")
+    def bulk(self, request):
+        """Assign a product to several vehicle years at once. Years that are
+        already assigned are skipped rather than raising an error."""
+        serializer = FitmentBulkSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        product = serializer.validated_data["product"]
+        notes = serializer.validated_data["notes"]
+        created = []
+        with transaction.atomic():
+            for vehicle_year in serializer.validated_data["vehicle_years"]:
+                fitment, was_created = Fitment.objects.get_or_create(
+                    product=product, vehicle_year=vehicle_year, defaults={"notes": notes}
+                )
+                if was_created:
+                    created.append(fitment.pk)
+        skipped = len(serializer.validated_data["vehicle_years"]) - len(created)
+        rows = self.get_queryset().filter(pk__in=created)
+        return Response(
+            {"created": len(created), "skipped": skipped, "results": FitmentReadSerializer(rows, many=True).data},
+            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )
