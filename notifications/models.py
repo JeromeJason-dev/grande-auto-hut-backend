@@ -9,6 +9,8 @@ class Notification(models.Model):
         TICKET_REPLY = "ticket_reply", "Support Ticket Reply"
         NEW_TICKET = "new_ticket", "New Support Ticket"
         TICKET_MESSAGE = "ticket_message", "Customer Ticket Message"
+        TICKET_ASSIGNED = "ticket_assigned", "Ticket Assigned"
+        TASK_ASSIGNED = "task_assigned", "Task Assigned"
         GENERAL = "general", "General"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
