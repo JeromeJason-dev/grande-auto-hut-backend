@@ -1,4 +1,6 @@
 from django.contrib.auth import get_user_model
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework import serializers
 
 from .models import Ticket, TicketMessage, TicketAttachment, Task
@@ -205,6 +207,101 @@ class StaffMemberSerializer(serializers.ModelSerializer):
 
     def get_full_name(self, obj):
         return display_name(obj)
+
+
+STAFF_ROLE_CHOICES = [(User.Role.STAFF, "Staff"), (User.Role.ADMIN, "Admin")]
+
+
+def _unique_username(email):
+    """Username is required by Django's base user but unused here (email is the login)."""
+    base = (email.split("@")[0] or "staff")[:140]
+    candidate, n = base, 1
+    while User.objects.filter(username__iexact=candidate).exists():
+        n += 1
+        candidate = f"{base}{n}"
+    return candidate
+
+
+def _check_email_free(value, exclude_pk=None):
+    value = value.strip().lower()
+    clash = User.objects.filter(email__iexact=value)
+    if exclude_pk:
+        clash = clash.exclude(pk=exclude_pk)
+    existing = clash.first()
+    if existing:
+        if not existing.is_active and existing.is_staff_role:
+            raise serializers.ValidationError(
+                "This person was removed earlier. Re-activate them in the Django admin instead of adding them again."
+            )
+        raise serializers.ValidationError("An account with this email already exists.")
+    return value
+
+
+class StaffCreateSerializer(serializers.ModelSerializer):
+    email = serializers.EmailField()
+    first_name = serializers.CharField(max_length=150)
+    last_name = serializers.CharField(max_length=150)
+    role = serializers.ChoiceField(choices=STAFF_ROLE_CHOICES, default=User.Role.STAFF)
+    password = serializers.CharField(write_only=True)
+
+    class Meta:
+        model = User
+        fields = ["email", "first_name", "last_name", "phone_number", "role", "password"]
+
+    def validate_email(self, value):
+        return _check_email_free(value)
+
+    def validate(self, attrs):
+        probe = User(email=attrs["email"], first_name=attrs["first_name"], last_name=attrs["last_name"])
+        try:
+            validate_password(attrs["password"], user=probe)
+        except DjangoValidationError as exc:
+            raise serializers.ValidationError({"password": list(exc.messages)})
+        return attrs
+
+    def create(self, validated_data):
+        password = validated_data.pop("password")
+        user = User(
+            username=_unique_username(validated_data["email"]),
+            is_email_verified=True,  # created by an admin, so there's no sign-up email to confirm
+            **validated_data,
+        )
+        user.set_password(password)
+        user.save()
+        return user
+
+
+class StaffUpdateSerializer(serializers.ModelSerializer):
+    """Partial update of an existing team member. `password` (optional) resets it."""
+    email = serializers.EmailField(required=False)
+    role = serializers.ChoiceField(choices=STAFF_ROLE_CHOICES, required=False)
+    password = serializers.CharField(write_only=True, required=False, allow_blank=True)
+
+    class Meta:
+        model = User
+        fields = ["email", "first_name", "last_name", "phone_number", "role", "password"]
+        extra_kwargs = {"first_name": {"required": False}, "last_name": {"required": False}}
+
+    def validate_email(self, value):
+        return _check_email_free(value, exclude_pk=self.instance.pk)
+
+    def validate(self, attrs):
+        password = attrs.get("password")
+        if password:
+            try:
+                validate_password(password, user=self.instance)
+            except DjangoValidationError as exc:
+                raise serializers.ValidationError({"password": list(exc.messages)})
+        return attrs
+
+    def update(self, instance, validated_data):
+        password = validated_data.pop("password", None)
+        for field, value in validated_data.items():
+            setattr(instance, field, value)
+        if password:
+            instance.set_password(password)
+        instance.save()
+        return instance
 
 
 class TaskSerializer(serializers.ModelSerializer):

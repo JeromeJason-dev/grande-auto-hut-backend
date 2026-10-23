@@ -15,7 +15,7 @@ from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 
 from accounts.models import User
-from accounts.permissions import IsOwnerOrStaff, IsStaffOrAdmin
+from accounts.permissions import IsAdmin, IsOwnerOrStaff, IsStaffOrAdmin
 from orders.models import Order
 from notifications.services import notify, notify_staff
 from .models import Ticket, TicketMessage, TicketAttachment, Task
@@ -23,7 +23,7 @@ from .serializers import (
     TicketListSerializer, TicketDetailSerializer, TicketCreateSerializer,
     TicketMessageSerializer, TicketMessageCreateSerializer,
     StaffTicketListSerializer, StaffTicketDetailSerializer, StaffTicketUpdateSerializer,
-    StaffMemberSerializer, TaskSerializer, display_name,
+    StaffMemberSerializer, StaffCreateSerializer, StaffUpdateSerializer, TaskSerializer, display_name,
 )
 
 
@@ -363,33 +363,106 @@ class TicketStatsView(views.APIView):
 
 # --------------------------------------------------------------------------- staff & tasks
 
-class StaffListView(generics.ListAPIView):
-    """Active team members with workload counts. Feeds the Staff page and every 'assign to' picker."""
-    serializer_class = StaffMemberSerializer
+def _staff_queryset():
+    """Active team members annotated with workload counts."""
+    today = timezone.localdate()
+    not_done = ~Q(tasks__status=Task.Status.DONE)
+    return (
+        User.objects.filter(role__in=[User.Role.STAFF, User.Role.ADMIN], is_active=True)
+        .annotate(
+            open_tickets=Count(
+                "assigned_tickets",
+                filter=Q(
+                    assigned_tickets__status__in=ACTIVE_STATUSES,
+                    assigned_tickets__is_archived=False,
+                    assigned_tickets__is_spam=False,
+                ),
+                distinct=True,
+            ),
+            open_tasks=Count("tasks", filter=not_done, distinct=True),
+            overdue_tasks=Count("tasks", filter=not_done & Q(tasks__due_date__lt=today), distinct=True),
+            done_tasks=Count("tasks", filter=Q(tasks__status=Task.Status.DONE), distinct=True),
+        )
+        .order_by("role", "first_name", "email")
+    )
+
+
+class StaffListView(generics.ListCreateAPIView):
+    """
+    GET  - active team members with workload counts (feeds the Staff page and every 'assign to' picker).
+    POST - admins only: create a staff/admin account.
+    """
     permission_classes = [IsStaffOrAdmin]
     pagination_class = None
 
+    def get_permissions(self):
+        return [IsAdmin()] if self.request.method == "POST" else [IsStaffOrAdmin()]
+
+    def get_serializer_class(self):
+        return StaffCreateSerializer if self.request.method == "POST" else StaffMemberSerializer
+
     def get_queryset(self):
-        today = timezone.localdate()
-        not_done = ~Q(tasks__status=Task.Status.DONE)
-        return (
-            User.objects.filter(role__in=[User.Role.STAFF, User.Role.ADMIN], is_active=True)
-            .annotate(
-                open_tickets=Count(
-                    "assigned_tickets",
-                    filter=Q(
-                        assigned_tickets__status__in=ACTIVE_STATUSES,
-                        assigned_tickets__is_archived=False,
-                        assigned_tickets__is_spam=False,
-                    ),
-                    distinct=True,
-                ),
-                open_tasks=Count("tasks", filter=not_done, distinct=True),
-                overdue_tasks=Count("tasks", filter=not_done & Q(tasks__due_date__lt=today), distinct=True),
-                done_tasks=Count("tasks", filter=Q(tasks__status=Task.Status.DONE), distinct=True),
-            )
-            .order_by("role", "first_name", "email")
+        return _staff_queryset()
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        user = serializer.save()
+        return Response(StaffMemberSerializer(_staff_queryset().get(pk=user.pk)).data, status=status.HTTP_201_CREATED)
+
+
+class StaffMemberDetailView(views.APIView):
+    """Admins only: edit a team member, or remove them (PATCH / DELETE)."""
+    permission_classes = [IsAdmin]
+
+    def get_member(self, id):
+        # Only live staff/admin accounts; customers can't be reached through this endpoint.
+        return get_object_or_404(
+            User.objects.filter(role__in=[User.Role.STAFF, User.Role.ADMIN], is_active=True), pk=id,
         )
+
+    def patch(self, request, id):
+        member = self.get_member(id)
+        serializer = StaffUpdateSerializer(member, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        if member == request.user and serializer.validated_data.get("role", member.role) != member.role:
+            raise ValidationError({"role": "You can't change your own role. Ask another admin."})
+        serializer.save()
+        return Response(StaffMemberSerializer(_staff_queryset().get(pk=member.pk)).data)
+
+    def delete(self, request, id):
+        """
+        "Delete" = deactivate. Their replies, tickets and finished tasks stay intact (hard-deleting
+        a user would cascade away every message they ever sent). They can no longer sign in and
+        disappear from the team list; active tickets go back to unassigned and unfinished tasks
+        are handed to `?reassign_to=<user id>` (default: the admin doing this).
+        """
+        member = self.get_member(id)
+        if member == request.user:
+            raise ValidationError({"detail": "You can't delete your own account."})
+
+        successor = request.user
+        reassign_to = request.query_params.get("reassign_to")
+        if reassign_to:
+            parsed = _parse_uuid(reassign_to)
+            successor = _staff_queryset().filter(pk=parsed).first() if parsed else None
+            if successor is None or successor == member:
+                raise ValidationError({"reassign_to": "Choose another active team member."})
+
+        with transaction.atomic():
+            member.is_active = False
+            member.save(update_fields=["is_active", "updated_at"])
+            unassigned = Ticket.objects.filter(assigned_to=member, status__in=ACTIVE_STATUSES).update(assigned_to=None)
+            moved = list(Task.objects.filter(assigned_to=member).exclude(status=Task.Status.DONE))
+            Task.objects.filter(pk__in=[t.pk for t in moved]).update(assigned_to=successor)
+
+        if moved and successor != request.user:
+            _safe_notify(
+                successor, "task_assigned", f"{len(moved)} task{'s' if len(moved) != 1 else ''} reassigned to you",
+                f"{display_name(member)} was removed from the team; their unfinished tasks are now yours.",
+                send_email=False, link="/admin/staff",
+            )
+        return Response({"tickets_unassigned": unassigned, "tasks_reassigned": len(moved), "reassigned_to": successor.id})
 
 
 class TaskListCreateView(generics.ListCreateAPIView):

@@ -2,7 +2,7 @@ from django.urls import path
 from .views import (
     TicketListCreateView, TicketDetailView, TicketMessageCreateView,
     TicketAttachmentDownloadView, TicketStatsView,
-    StaffListView, TaskListCreateView, TaskDetailView,
+    StaffListView, StaffMemberDetailView, TaskListCreateView, TaskDetailView,
 )
 
 urlpatterns = [
@@ -15,6 +15,7 @@ urlpatterns = [
         TicketAttachmentDownloadView.as_view(), name="ticket-attachment-download",
     ),
     path("staff/", StaffListView.as_view(), name="staff-list"),
+    path("staff/<uuid:id>/", StaffMemberDetailView.as_view(), name="staff-detail"),
     path("tasks/", TaskListCreateView.as_view(), name="task-list-create"),
     path("tasks/<uuid:id>/", TaskDetailView.as_view(), name="task-detail"),
 ]
