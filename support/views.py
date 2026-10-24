@@ -466,9 +466,17 @@ class StaffMemberDetailView(views.APIView):
 
 
 class TaskListCreateView(generics.ListCreateAPIView):
+    """
+    GET  - admins see every task; staff only ever see the ones assigned to them.
+    POST - admins only. Staff cannot create tasks, not even for themselves; they receive
+           tasks from an admin and can only update the status (see TaskDetailView).
+    """
     serializer_class = TaskSerializer
     permission_classes = [IsStaffOrAdmin]
     pagination_class = FlexiblePagination
+
+    def get_permissions(self):
+        return [IsAdmin()] if self.request.method == "POST" else [IsStaffOrAdmin()]
 
     def get_queryset(self):
         user = self.request.user
@@ -507,9 +515,9 @@ class TaskListCreateView(generics.ListCreateAPIView):
 
     def perform_create(self, serializer):
         user = self.request.user
+        if not user.is_admin_role:
+            raise PermissionDenied("Only admins can create and assign tasks.")
         assignee = serializer.validated_data.get("assigned_to") or user
-        if assignee != user and not user.is_admin_role:
-            raise PermissionDenied("Only admins can assign tasks to other staff.")
         task = serializer.save(assigned_to=assignee, created_by=user)
         if assignee != user:
             _safe_notify(
