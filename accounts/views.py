@@ -1,3 +1,4 @@
+import logging
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.contrib.auth.tokens import default_token_generator
@@ -23,6 +24,7 @@ from .serializers import (
 )
 
 User = get_user_model()
+logger = logging.getLogger(__name__)
 
 
 def _set_refresh_cookie(response, refresh_token: str):
@@ -109,8 +111,10 @@ class GoogleLoginView(APIView):
                 serializer.validated_data["id_token"],
                 google_requests.Request(),
                 audience=settings.FIREBASE_PROJECT_ID,
+                clock_skew_in_seconds=10,  
             )
-        except Exception:
+        except Exception as exc:
+            logger.warning("Firebase ID token verification failed: %s", exc)
             claims = None
 
         if not claims:
