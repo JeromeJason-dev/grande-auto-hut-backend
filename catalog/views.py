@@ -1,6 +1,8 @@
 from django_filters.rest_framework import DjangoFilterBackend, FilterSet, filters
 from django.shortcuts import get_object_or_404
-from rest_framework import generics, filters as drf_filters
+from django.db.models import ProtectedError
+from rest_framework import generics, filters as drf_filters, status
+from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.permissions import SAFE_METHODS
 from accounts.permissions import AllowAnyReadOnlyOrStaffWrite, IsStaffOrAdmin
@@ -13,8 +15,11 @@ from .serializers import (
 
 
 def _is_staff(request):
+    # Role-based, matching accounts.permissions. Django's `is_staff` flag is never
+    # set for role-based staff/admin accounts, so checking it hid inactive products
+    # from (and blocked editing/deleting them for) everyone but superusers.
     user = getattr(request, "user", None)
-    return bool(user and user.is_authenticated and user.is_staff)
+    return bool(user and user.is_authenticated and user.is_staff_role)
 
 
 # --- Categories ---
@@ -97,6 +102,18 @@ class ProductDetailView(generics.RetrieveUpdateDestroyAPIView):
 
     def get_serializer_class(self):
         return ProductWriteSerializer if self.request.method in ("PUT", "PATCH") else ProductDetailSerializer
+
+    def destroy(self, request, *args, **kwargs):
+        # Order lines point at products with PROTECT so order history stays intact.
+        # Turn that into a clear 409 instead of a server error.
+        try:
+            return super().destroy(request, *args, **kwargs)
+        except ProtectedError:
+            return Response(
+                {"detail": "This product appears on existing orders and can't be deleted. "
+                           "Mark it inactive instead to hide it from the store."},
+                status=status.HTTP_409_CONFLICT,
+            )
 
 
 # --- Product images ---
