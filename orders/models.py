@@ -115,7 +115,7 @@ class Order(models.Model):
     @property
     def payment_status(self):
         """
-        Derived, display-level payment state: "paid", "pending" or "failed".
+        Derived, display-level payment state: "paid", "pending", "failed" or "refunded".
 
         Computed from the related payments (via .all(), so it reuses
         prefetch_related("payments") and costs no extra queries in list views).
@@ -125,6 +125,9 @@ class Order(models.Model):
 
         if "success" in statuses:
             return "paid"
+        # Money was taken and then returned (recorded by an admin), with nothing new in flight.
+        if "refunded" in statuses and "pending" not in statuses:
+            return "refunded"
         # Cash on delivery counts as paid once the goods have been delivered.
         if self.payment_method == self.PaymentMethod.COD and self.status == self.Status.DELIVERED:
             return "paid"

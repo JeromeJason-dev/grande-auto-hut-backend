@@ -1,6 +1,6 @@
 import re
 from rest_framework import serializers
-from .models import Payment
+from .models import Payment, PaymentAuditLog
 
 
 class MpesaInitiateSerializer(serializers.Serializer):
@@ -38,3 +38,44 @@ class CardInitiateSerializer(serializers.Serializer):
 class CardVerifySerializer(serializers.Serializer):
     order_id = serializers.UUIDField()
     reference = serializers.CharField(max_length=100, required=False, allow_blank=True)
+
+
+class PaymentDetailSerializer(serializers.ModelSerializer):
+    """Everything staff may *see* about a payment attempt. Read-only by design."""
+    method_label = serializers.CharField(source="get_method_display", read_only=True)
+
+    class Meta:
+        model = Payment
+        fields = [
+            "id", "method", "method_label", "status", "amount", "phone_number",
+            "mpesa_receipt_number", "mpesa_checkout_request_id",
+            "card_brand", "card_last4", "card_reference",
+            "recorded_manually", "raw_callback", "created_at", "updated_at",
+        ]
+        read_only_fields = fields
+
+
+class PaymentAuditLogSerializer(serializers.ModelSerializer):
+    performed_by_name = serializers.SerializerMethodField()
+    action_label = serializers.CharField(source="get_action_display", read_only=True)
+
+    class Meta:
+        model = PaymentAuditLog
+        fields = [
+            "id", "action", "action_label", "from_status", "to_status", "amount",
+            "reference", "reason", "performed_by_name", "created_at",
+        ]
+        read_only_fields = fields
+
+    def get_performed_by_name(self, obj):
+        user = obj.performed_by
+        if not user:
+            return "Unknown"
+        return user.get_full_name() or user.email
+
+
+class ManualPaymentSerializer(serializers.Serializer):
+    """Body for "mark as paid" and "record refund": a reason is mandatory."""
+    reason = serializers.CharField(min_length=5, max_length=255, trim_whitespace=True)
+    reference = serializers.CharField(max_length=100, required=False, allow_blank=True, default="")
+    payment_id = serializers.UUIDField(required=False)  # refund only: pick one of several successful payments

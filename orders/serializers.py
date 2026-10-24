@@ -159,8 +159,3 @@ class OrderDetailSerializer(CustomerFieldsMixin, serializers.ModelSerializer):
 class OrderStatusUpdateSerializer(serializers.Serializer):
     status = serializers.ChoiceField(choices=Order.Status.choices)
     note = serializers.CharField(required=False, allow_blank=True, default="")
-
-
-class OrderPaymentStatusUpdateSerializer(serializers.Serializer):
-    payment_status = serializers.ChoiceField(choices=["paid", "pending", "failed"])
-    note = serializers.CharField(required=False, allow_blank=True, default="")

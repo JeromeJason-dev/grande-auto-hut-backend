@@ -9,15 +9,19 @@ from rest_framework import permissions, status, views
 from rest_framework.response import Response
 from rest_framework.exceptions import ValidationError, PermissionDenied
 
+from accounts.permissions import IsAdmin, IsStaffOrAdmin
+
 from orders.models import Order
-from .models import Payment
+from .models import Payment, PaymentAuditLog
 from .serializers import (
-    CardInitiateSerializer, CardVerifySerializer, MpesaInitiateSerializer, MpesaStatusSerializer, PaymentSerializer,
+    CardInitiateSerializer, CardVerifySerializer, ManualPaymentSerializer, MpesaInitiateSerializer,
+    MpesaStatusSerializer, PaymentAuditLogSerializer, PaymentDetailSerializer, PaymentSerializer,
 )
 from .services import (
-    CardPaymentError, MpesaClient, MpesaError, PaystackClient,
+    CardPaymentError, MpesaClient, MpesaError, PaymentActionError, PaystackClient,
     extract_callback_metadata, finalize_card_payment, finalize_mpesa_payment,
-    reconcile_pending_mpesa_payments, valid_paystack_signature,
+    mark_order_paid_manually, reconcile_pending_mpesa_payments, recheck_order_payments,
+    refund_order_payment, valid_paystack_signature,
 )
 
 logger = logging.getLogger(__name__)
@@ -267,3 +271,85 @@ class CardWebhookView(views.APIView):
 
         finalize_card_payment(payment.pk, tx)
         return Response({"ok": True})
+
+
+
+def _order_payments_payload(order, user, detail=None):
+    order = Order.objects.prefetch_related("payments").get(pk=order.pk)
+    payments = list(order.payments.all())
+    has_success = any(p.status == Payment.Status.SUCCESS for p in payments)
+    is_admin = bool(user.is_admin_role)
+    payload = {
+        "order_id": str(order.id),
+        "order_number": order.order_number,
+        "order_status": order.status,
+        "payment_method": order.payment_method,
+        "payment_status": order.payment_status,
+        "total": str(order.total),
+        "payments": PaymentDetailSerializer(payments, many=True).data,
+        "audit_log": PaymentAuditLogSerializer(order.payment_audit_logs.select_related("performed_by"), many=True).data,
+        # What the UI may offer this user right now (the server re-checks on every action).
+        "can_recheck": order.payment_method != "cod" and bool(payments),
+        "can_mark_paid": is_admin and not has_success and order.status != Order.Status.CANCELLED,
+        "can_refund": is_admin and has_success,
+    }
+    if detail:
+        payload["detail"] = detail
+    return payload
+
+
+class OrderPaymentsView(views.APIView):
+    permission_classes = [IsStaffOrAdmin]
+
+    def get(self, request, order_id):
+        order = get_object_or_404(Order, id=order_id)
+        return Response(_order_payments_payload(order, request.user))
+
+
+class OrderPaymentRecheckView(views.APIView):
+    permission_classes = [IsStaffOrAdmin]
+
+    def post(self, request, order_id):
+        order = get_object_or_404(Order, id=order_id)
+        try:
+            message = recheck_order_payments(order, request.user)
+        except PaymentActionError as exc:
+            raise ValidationError(str(exc))
+        return Response(_order_payments_payload(order, request.user, detail=message))
+
+
+class OrderPaymentMarkPaidView(views.APIView):
+    permission_classes = [IsAdmin]
+
+    def post(self, request, order_id):
+        order = get_object_or_404(Order, id=order_id)
+        serializer = ManualPaymentSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            mark_order_paid_manually(
+                order, request.user,
+                reason=serializer.validated_data["reason"],
+                reference=serializer.validated_data["reference"],
+            )
+        except PaymentActionError as exc:
+            raise ValidationError(str(exc))
+        return Response(_order_payments_payload(order, request.user, detail="Payment recorded and the customer notified."))
+
+
+class OrderPaymentRefundView(views.APIView):
+    permission_classes = [IsAdmin]
+
+    def post(self, request, order_id):
+        order = get_object_or_404(Order, id=order_id)
+        serializer = ManualPaymentSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            refund_order_payment(
+                order, request.user,
+                reason=serializer.validated_data["reason"],
+                reference=serializer.validated_data["reference"],
+                payment_id=serializer.validated_data.get("payment_id"),
+            )
+        except PaymentActionError as exc:
+            raise ValidationError(str(exc))
+        return Response(_order_payments_payload(order, request.user, detail="Refund recorded and the customer notified."))

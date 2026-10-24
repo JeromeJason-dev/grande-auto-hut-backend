@@ -297,6 +297,9 @@ def finalize_mpesa_payment(payment_id, result_code, result_desc="", metadata=Non
             payment.mpesa_receipt_number = metadata.get("MpesaReceiptNumber", "") or payment.mpesa_receipt_number
             payment.save(update_fields=["status", "mpesa_receipt_number", "raw_callback", "updated_at"])
 
+            if order.payments.filter(status=Payment.Status.SUCCESS).exclude(pk=payment.pk).exists():
+                logger.error("Order %s was paid twice (%s) - refund the duplicate.",
+                             order.order_number, payment.mpesa_checkout_request_id)
             if order.status == Order.Status.CANCELLED:
                 logger.error("Order %s was cancelled but an M-Pesa payment succeeded (%s) - refund needed.",
                              order.order_number, payment.mpesa_checkout_request_id)
@@ -346,3 +349,135 @@ def reconcile_pending_mpesa_payments(order):
                 payment.pk, outcome["result_code"], outcome["result_desc"], raw={"stk_query": outcome},
             )
     return order.payments.filter(method="mpesa").order_by("-created_at").first()
+
+
+
+class PaymentActionError(Exception):
+    """A staff/admin payment action isn't allowed in the order's current state."""
+
+
+def _audit(order, action, *, user, payment=None, from_status="", to_status="", amount=None, reference="", reason=""):
+    from .models import PaymentAuditLog
+
+    return PaymentAuditLog.objects.create(
+        order=order, payment=payment, action=action,
+        from_status=from_status, to_status=to_status, amount=amount,
+        reference=(reference or "")[:100], reason=(reason or "")[:255], performed_by=user,
+    )
+
+
+def recheck_order_payments(order, user):
+    import logging
+    from .models import Payment
+
+    logger = logging.getLogger(__name__)
+
+    if order.payment_method == "cod":
+        raise PaymentActionError("Pay on Delivery orders have no gateway to re-check.")
+    if not order.payments.exists():
+        raise PaymentActionError("No payment was ever started for this order, so there is nothing to re-check.")
+
+    before = {p.pk: p.status for p in order.payments.all()}
+    problem = ""
+
+    if order.payment_method == "mpesa":
+        reconcile_pending_mpesa_payments(order)
+    else:
+        candidates = order.payments.filter(method="card", status__in=[Payment.Status.PENDING, Payment.Status.FAILED]) \
+            .exclude(card_reference__isnull=True).exclude(card_reference="")
+        for payment in candidates:
+            try:
+                tx = PaystackClient().verify(payment.card_reference)
+            except CardPaymentError as exc:
+                logger.warning("Card re-check failed for order %s: %s", order.order_number, exc)
+                problem = str(exc)
+                continue
+            if tx.get("reference") == payment.card_reference:
+                finalize_card_payment(payment.pk, tx)
+
+    changed = []
+    for payment in order.payments.all():
+        old = before.get(payment.pk)
+        if old != payment.status:
+            changed.append(payment)
+            _audit(order, "recheck", user=user, payment=payment, from_status=old or "", to_status=payment.status,
+                   amount=payment.amount, reason="Re-checked with the payment gateway.")
+
+    if changed:
+        return "Payment updated: " + ", ".join(f"{p.get_method_display()} is now {p.get_status_display().lower()}" for p in changed) + "."
+    if problem:
+        return f"Couldn't reach the payment gateway ({problem}). Nothing was changed; try again shortly."
+    if order.payments.filter(status=Payment.Status.PENDING).exists():
+        return "The gateway reports the payment is still waiting for the customer. Nothing changed."
+    return "The gateway confirms the current payment status. Nothing changed."
+
+
+def mark_order_paid_manually(order, user, reason, reference=""):
+    from django.db import transaction
+    from inventory.services import InsufficientStockError
+    from orders.models import Order
+    from orders.services import CheckoutError, InvalidTransitionError, confirm_order
+    from .models import Payment
+
+    # The gateway's word beats a manual entry: settle any open attempt first.
+    if order.payment_method == "mpesa":
+        reconcile_pending_mpesa_payments(order)
+
+    with transaction.atomic():
+        locked = Order.objects.select_for_update(of=("self",)).get(pk=order.pk)
+        if locked.status == Order.Status.CANCELLED:
+            raise PaymentActionError("This order is cancelled, so it can't be marked as paid.")
+        if locked.payments.filter(status=Payment.Status.SUCCESS).exists():
+            raise PaymentActionError("This order is already paid.")
+
+        previous = locked.payment_status
+        payment = Payment.objects.create(
+            order=locked, method=locked.payment_method, status=Payment.Status.SUCCESS,
+            amount=locked.total, recorded_manually=True,
+            mpesa_receipt_number=(reference or "")[:50] if locked.payment_method == "mpesa" else "",
+        )
+        # Anything still "pending" is now superseded. (A late gateway success is still logged as a duplicate.)
+        locked.payments.filter(status=Payment.Status.PENDING).update(status=Payment.Status.FAILED)
+
+        if locked.status == Order.Status.PENDING:
+            try:
+                confirm_order(locked, user=user, note=f"Payment recorded manually by staff. {reason}"[:255])
+            except (CheckoutError, InsufficientStockError, InvalidTransitionError) as exc:
+                raise PaymentActionError(f"Couldn't mark as paid: {exc}") from exc
+
+        _audit(locked, "mark_paid", user=user, payment=payment, from_status=previous, to_status="paid",
+               amount=payment.amount, reference=reference, reason=reason)
+
+    from notifications.services import notify
+    notify(
+        order.user, "order_update", f"Payment received for {order.order_number}",
+        f"We have recorded your payment for order {order.order_number}. Thank you!",
+    )
+    return Order.objects.select_related("user").get(pk=order.pk)
+
+
+def refund_order_payment(order, user, reason, reference="", payment_id=None):
+    from django.db import transaction
+    from .models import Payment
+
+    with transaction.atomic():
+        payments = order.payments.select_for_update().filter(status=Payment.Status.SUCCESS).order_by("-created_at")
+        if payment_id:
+            payments = payments.filter(pk=payment_id)
+        payment = payments.first()
+        if payment is None:
+            raise PaymentActionError("There is no successful payment on this order to refund.")
+
+        previous = order.payment_status
+        payment.status = Payment.Status.REFUNDED
+        payment.save(update_fields=["status", "updated_at"])
+        order = type(order).objects.select_related("user").get(pk=order.pk)
+        _audit(order, "refund", user=user, payment=payment, from_status=previous, to_status=order.payment_status,
+               amount=payment.amount, reference=reference, reason=reason)
+
+    from notifications.services import notify
+    notify(
+        order.user, "order_update", f"Refund recorded for {order.order_number}",
+        f"A refund of KES {payment.amount:,.2f} has been recorded for order {order.order_number}.",
+    )
+    return order
