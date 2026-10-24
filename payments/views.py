@@ -10,16 +10,14 @@ from rest_framework.response import Response
 from rest_framework.exceptions import ValidationError, PermissionDenied
 
 from orders.models import Order
-from orders.services import confirm_order
-from inventory.services import InsufficientStockError
-from orders.services import CheckoutError
 from .models import Payment
 from .serializers import (
-    CardInitiateSerializer, CardVerifySerializer, MpesaInitiateSerializer, PaymentSerializer,
+    CardInitiateSerializer, CardVerifySerializer, MpesaInitiateSerializer, MpesaStatusSerializer, PaymentSerializer,
 )
 from .services import (
     CardPaymentError, MpesaClient, MpesaError, PaystackClient,
-    extract_callback_metadata, finalize_card_payment, valid_paystack_signature,
+    extract_callback_metadata, finalize_card_payment, finalize_mpesa_payment,
+    reconcile_pending_mpesa_payments, valid_paystack_signature,
 )
 
 logger = logging.getLogger(__name__)
@@ -46,7 +44,10 @@ class MpesaInitiateView(views.APIView):
             raise ValidationError("This order is not set up for M-Pesa payment.")
         if order.status != Order.Status.PENDING:
             raise ValidationError(f"Order is '{order.status}' - only pending orders can be paid.")
-        if order.payments.filter(status=Payment.Status.SUCCESS).exists():
+        # A previous prompt may have been paid/cancelled without us hearing about it yet.
+        reconcile_pending_mpesa_payments(order)
+        order.refresh_from_db()
+        if order.status != Order.Status.PENDING or order.payments.filter(status=Payment.Status.SUCCESS).exists():
             raise ValidationError("This order has already been paid.")
 
         phone_number = serializer.validated_data["phone_number"]
@@ -105,41 +106,39 @@ class MpesaCallbackView(views.APIView):
             # Still ack 200 so Safaricom doesn't retry indefinitely on a request we'll never match.
             return Response({"ResultCode": 0, "ResultDesc": "Accepted"})
 
-        payment.raw_callback = request.data
-
-        if payment.status != Payment.Status.PENDING:
-            # Duplicate/retried callback - already processed, just ack.
-            payment.save(update_fields=["raw_callback"])
-            return Response({"ResultCode": 0, "ResultDesc": "Accepted"})
-
-        if result_code == 0:
-            metadata = extract_callback_metadata(stk_callback)
-            paid_amount = metadata.get("Amount")
-            if paid_amount is not None and float(paid_amount) != float(payment.amount):
-                # Amount mismatch - do NOT mark paid. Flag for manual review.
-                payment.status = Payment.Status.FAILED
-                payment.save(update_fields=["status", "raw_callback"])
-                logger.error(
-                    "M-Pesa amount mismatch for order %s: expected %s got %s",
-                    payment.order.order_number, payment.amount, paid_amount,
-                )
-                return Response({"ResultCode": 0, "ResultDesc": "Accepted"})
-
-            payment.status = Payment.Status.SUCCESS
-            payment.mpesa_receipt_number = metadata.get("MpesaReceiptNumber", "")
-            payment.save(update_fields=["status", "mpesa_receipt_number", "raw_callback"])
-
-            try:
-                confirm_order(payment.order, note=f"Paid via M-Pesa, receipt {payment.mpesa_receipt_number}.")
-            except (CheckoutError, InsufficientStockError) as exc:
-                # Payment succeeded but stock ran out in the meantime - needs a human.
-                logger.error("Order %s paid but could not auto-confirm: %s", payment.order.order_number, exc)
-        else:
-            payment.status = Payment.Status.FAILED
-            payment.save(update_fields=["status", "raw_callback"])
-            logger.info("M-Pesa payment failed/cancelled for order %s: %s", payment.order.order_number, result_desc)
-
+        # Shared with the status endpoint below, so both apply outcomes identically.
+        finalize_mpesa_payment(
+            payment.pk,
+            result_code=int(result_code) if result_code is not None else -1,
+            result_desc=result_desc,
+            metadata=extract_callback_metadata(stk_callback) if result_code == 0 else {},
+            raw=request.data,
+        )
         return Response({"ResultCode": 0, "ResultDesc": "Accepted"})
+
+
+class MpesaStatusView(views.APIView):
+    """
+    POST /api/payments/mpesa/status/   Body: {"order_id": "..."}
+    Called (polled) by the frontend after an STK push. Asks Safaricom directly
+    what happened to the prompt and applies it, so the page shows paid / failed /
+    cancelled even when the callback is delayed or can't reach us (local dev).
+    Safe to call repeatedly. Returns the latest M-Pesa payment, or
+    {"status": "none"} if no STK push was ever sent for this order.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        serializer = MpesaStatusSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        order = _get_owned_order(request, serializer.validated_data["order_id"])
+
+        payment = reconcile_pending_mpesa_payments(order)
+        if payment is None:
+            return Response({"status": "none"})
+        # Any successful attempt wins over a later failed one.
+        success = order.payments.filter(method="mpesa", status=Payment.Status.SUCCESS).first()
+        return Response(PaymentSerializer(success or payment).data)
 
 
 # ---------------------------------------------------------------------------

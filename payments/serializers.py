@@ -20,6 +20,10 @@ class MpesaInitiateSerializer(serializers.Serializer):
         return digits
 
 
+class MpesaStatusSerializer(serializers.Serializer):
+    order_id = serializers.UUIDField()
+
+
 class PaymentSerializer(serializers.ModelSerializer):
     class Meta:
         model = Payment

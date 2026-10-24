@@ -86,6 +86,45 @@ class MpesaClient:
             raise MpesaError(f"STK push failed: {resp.status_code} {resp.text}")
         return resp.json()
 
+    def stk_query(self, checkout_request_id: str):
+        """
+        Asks Safaricom for the outcome of an STK push (the "STK Push Query" API).
+
+        Returns {"result_code": int, "result_desc": str} once the transaction has
+        reached a final state (0 = paid; 1032 = cancelled by the customer;
+        1 = insufficient funds; 2001 = wrong PIN; 1037 = prompt timed out ...),
+        or None while the customer is still looking at the prompt.
+        """
+        token = self._get_access_token()
+        password, timestamp = self._password_and_timestamp()
+        resp = requests.post(
+            f"{self.base_url}/mpesa/stkpushquery/v1/query",
+            json={
+                "BusinessShortCode": settings.MPESA_SHORTCODE,
+                "Password": password,
+                "Timestamp": timestamp,
+                "CheckoutRequestID": checkout_request_id,
+            },
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=30,
+        )
+        try:
+            body = resp.json()
+        except ValueError as exc:
+            raise MpesaError(f"STK query returned a non-JSON response ({resp.status_code})") from exc
+
+        # While the prompt is still open Daraja answers with an *error* payload
+        # ("The transaction is being processed") instead of a result.
+        if "ResultCode" not in body:
+            if body.get("errorCode") == "500.001.1001":
+                return None
+            raise MpesaError(f"STK query failed: {resp.status_code} {resp.text}")
+        try:
+            result_code = int(body["ResultCode"])
+        except (TypeError, ValueError) as exc:
+            raise MpesaError(f"STK query returned an unreadable ResultCode: {body['ResultCode']!r}") from exc
+        return {"result_code": result_code, "result_desc": body.get("ResultDesc", "")}
+
 
 def extract_callback_metadata(stk_callback: dict) -> dict:
     """Flattens Safaricom's {Item: [{Name, Value}, ...]} shape into a plain dict."""
@@ -201,3 +240,109 @@ def finalize_card_payment(payment_id, tx: dict):
             # Paid but stock ran out in the meantime - needs a human.
             logger.error("Order %s paid by card but could not auto-confirm: %s", payment.order.order_number, exc)
     return payment
+
+
+def finalize_mpesa_payment(payment_id, result_code, result_desc="", metadata=None, raw=None):
+    """
+    Applies a final M-Pesa outcome to a Payment. Used by BOTH the Safaricom
+    callback and the status-check endpoint, so the two can never disagree.
+    Idempotent: safe to call repeatedly, and in any order.
+
+    result_code 0 = paid; anything else = failed/cancelled.
+
+    A callback saying "paid" is authoritative even if we had already marked
+    the attempt failed (e.g. a superseded or timed-out prompt the customer
+    paid anyway) - the money has moved, so the record must say so.
+    The status query carries no amount/receipt, so those checks only run when
+    `metadata` (callback-only) is supplied.
+    """
+    import logging
+    from django.db import transaction
+    from inventory.services import InsufficientStockError
+    from orders.models import Order
+    from orders.services import CheckoutError, InvalidTransitionError, confirm_order
+    from .models import Payment
+
+    logger = logging.getLogger(__name__)
+    metadata = metadata or {}
+    should_confirm = False
+
+    with transaction.atomic():
+        payment = Payment.objects.select_for_update(of=("self",)).select_related("order").get(pk=payment_id)
+        order = payment.order
+        # Don't let a stale "failed" notice overwrite the record of a payment that succeeded.
+        if raw is not None and not (payment.status == Payment.Status.SUCCESS and result_code != 0):
+            payment.raw_callback = raw
+
+        if payment.status == Payment.Status.SUCCESS:
+            # Already paid. A late callback may still carry the receipt number.
+            if metadata.get("MpesaReceiptNumber") and not payment.mpesa_receipt_number:
+                payment.mpesa_receipt_number = metadata["MpesaReceiptNumber"]
+            payment.save(update_fields=["mpesa_receipt_number", "raw_callback", "updated_at"])
+            return payment
+
+        if result_code == 0:
+            paid_amount = metadata.get("Amount")
+            # We send int(amount) to Daraja (whole shillings only), so compare against that.
+            if paid_amount is not None and int(float(paid_amount)) != int(payment.amount):
+                payment.status = Payment.Status.FAILED
+                payment.save(update_fields=["status", "raw_callback", "updated_at"])
+                logger.error(
+                    "M-Pesa amount mismatch for order %s: expected %s got %s - needs manual review.",
+                    order.order_number, int(payment.amount), paid_amount,
+                )
+                return payment
+
+            payment.status = Payment.Status.SUCCESS
+            payment.mpesa_receipt_number = metadata.get("MpesaReceiptNumber", "") or payment.mpesa_receipt_number
+            payment.save(update_fields=["status", "mpesa_receipt_number", "raw_callback", "updated_at"])
+
+            if order.status == Order.Status.CANCELLED:
+                logger.error("Order %s was cancelled but an M-Pesa payment succeeded (%s) - refund needed.",
+                             order.order_number, payment.mpesa_checkout_request_id)
+            should_confirm = order.status == Order.Status.PENDING
+
+        elif payment.status == Payment.Status.PENDING:
+            payment.status = Payment.Status.FAILED
+            payment.save(update_fields=["status", "raw_callback", "updated_at"])
+            logger.info("M-Pesa payment failed/cancelled for order %s: %s (code %s)",
+                        order.order_number, result_desc, result_code)
+        else:
+            payment.save(update_fields=["raw_callback", "updated_at"])
+
+    if should_confirm:
+        receipt = payment.mpesa_receipt_number
+        try:
+            confirm_order(order, note=f"Paid via M-Pesa{f', receipt {receipt}' if receipt else ''}.")
+        except (CheckoutError, InsufficientStockError, InvalidTransitionError) as exc:
+            # Paid, but stock ran out (or the order moved on) in the meantime - needs a human.
+            logger.error("Order %s paid but could not auto-confirm: %s", order.order_number, exc)
+    return payment
+
+
+def reconcile_pending_mpesa_payments(order):
+    """
+    Asks Safaricom about every still-pending M-Pesa attempt on an order and
+    applies any final outcome. Returns the order's most recent M-Pesa payment
+    (refreshed), or None if it has none. Network/Daraja errors leave the
+    attempt pending so the caller can simply poll again.
+    """
+    import logging
+    from .models import Payment
+
+    logger = logging.getLogger(__name__)
+    pending = order.payments.filter(
+        method="mpesa", status=Payment.Status.PENDING,
+    ).exclude(mpesa_checkout_request_id__isnull=True).exclude(mpesa_checkout_request_id="")
+
+    for payment in pending:
+        try:
+            outcome = MpesaClient().stk_query(payment.mpesa_checkout_request_id)
+        except (MpesaError, requests.RequestException) as exc:
+            logger.warning("STK query failed for order %s: %s", order.order_number, exc)
+            continue
+        if outcome is not None:
+            finalize_mpesa_payment(
+                payment.pk, outcome["result_code"], outcome["result_desc"], raw={"stk_query": outcome},
+            )
+    return order.payments.filter(method="mpesa").order_by("-created_at").first()
