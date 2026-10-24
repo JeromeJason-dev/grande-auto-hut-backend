@@ -83,3 +83,6 @@ class AdminCustomerSerializer(serializers.ModelSerializer):
         model = User
         fields = ["id", "email", "first_name", "last_name", "phone_number", "created_at"]
         read_only_fields = fields
+
+class GoogleAuthSerializer(serializers.Serializer):
+    id_token = serializers.CharField(write_only=True)

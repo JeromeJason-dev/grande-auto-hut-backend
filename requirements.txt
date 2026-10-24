@@ -31,3 +31,4 @@ urllib3==2.7.0
 whitenoise==6.12.0
 cloudinary
 django-cloudinary-storage
+google-auth

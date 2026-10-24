@@ -2,6 +2,7 @@ from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.contrib.auth.tokens import default_token_generator
 from django.core.mail import send_mail
+from django.db import IntegrityError, transaction
 from django.utils.encoding import force_bytes, force_str
 from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
 from rest_framework import generics, status, viewsets, permissions
@@ -10,13 +11,15 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.exceptions import TokenError
+from google.auth.transport import requests as google_requests
+from google.oauth2 import id_token as google_id_token
 
 from .models import Address
 from .permissions import IsOwnerOrStaff
 from .serializers import (
     RegisterSerializer, MeSerializer, ProfileUpdateSerializer, ChangePasswordSerializer,
     PasswordResetRequestSerializer, PasswordResetConfirmSerializer, AddressSerializer,
-    AdminCustomerSerializer,
+    AdminCustomerSerializer, GoogleAuthSerializer,
 )
 
 User = get_user_model()
@@ -76,6 +79,100 @@ class LoginView(TokenObtainPairView):
         )
 
         # Keep setting the secure HttpOnly cookie as a backup/alternative auth method
+        _set_refresh_cookie(response, refresh)
+        return response
+
+
+def _unique_username(email: str) -> str:
+    base = (email.split("@")[0] or "user")[:130]
+    candidate, n = base, 1
+    while User.objects.filter(username__iexact=candidate).exists():
+        n += 1
+        candidate = f"{base}{n}"
+    return candidate
+
+
+class GoogleLoginView(APIView):
+    permission_classes = [permissions.AllowAny]
+    authentication_classes = []
+
+    def post(self, request):
+        serializer = GoogleAuthSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        if not settings.FIREBASE_PROJECT_ID:
+            return Response({"detail": "Google sign-in is not configured."},
+                            status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+        try:
+            claims = google_id_token.verify_firebase_token(
+                serializer.validated_data["id_token"],
+                google_requests.Request(),
+                audience=settings.FIREBASE_PROJECT_ID,
+            )
+        except Exception:
+            claims = None
+
+        if not claims:
+            return Response({"detail": "Invalid or expired Google sign-in."},
+                            status=status.HTTP_401_UNAUTHORIZED)
+
+        email = (claims.get("email") or "").lower()
+        provider = (claims.get("firebase") or {}).get("sign_in_provider")
+        if provider != "google.com" or not email or not claims.get("email_verified"):
+            return Response({"detail": "Your Google account must have a verified email."},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        created = False
+        user = User.objects.filter(email__iexact=email).first()
+        if user is None:
+            full_name = (claims.get("name") or "").strip()
+            first, _, last = full_name.partition(" ")
+            try:
+                with transaction.atomic():
+                    user = User(
+                        email=email,
+                        username=_unique_username(email),
+                        first_name=first[:150],
+                        last_name=last[:150],
+                        role=User.Role.CUSTOMER,
+                        is_email_verified=True,
+                    )
+                    user.set_unusable_password()
+                    user.save()
+                created = True
+            except IntegrityError:
+                # Lost a race with a concurrent sign-in for the same email.
+                user = User.objects.filter(email__iexact=email).first()
+                if user is None:
+                    raise
+
+        if not user.is_active:
+            return Response({"detail": "This account is disabled."},
+                            status=status.HTTP_403_FORBIDDEN)
+
+        if not user.is_email_verified:
+            # Google has verified ownership of this address.
+            user.is_email_verified = True
+            user.save(update_fields=["is_email_verified"])
+
+        if created:
+            from notifications.services import notify
+            notify(
+                user, "account", "Welcome to Grande Auto Hut!",
+                "Thanks for creating an account. Start with our Fitment Finder to find parts for your vehicle.",
+            )
+
+        refresh = RefreshToken.for_user(user)
+        response = Response(
+            {
+                "access": str(refresh.access_token),
+                "refresh": str(refresh),
+                "created": created,
+                "user": MeSerializer(user).data,
+            },
+            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )
         _set_refresh_cookie(response, refresh)
         return response
 

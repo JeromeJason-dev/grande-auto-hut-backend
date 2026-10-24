@@ -207,6 +207,9 @@ REFRESH_COOKIE_SECURE = env_bool('REFRESH_COOKIE_SECURE', not DEBUG)
 # Cross-site deployment (Vercel frontend + Render backend) requires SameSite='None'
 REFRESH_COOKIE_SAMESITE = os.getenv('REFRESH_COOKIE_SAMESITE', 'None' if not DEBUG else 'Lax')
 
+# Firebase (Google sign-in). Only the project ID is needed to verify ID tokens.
+FIREBASE_PROJECT_ID = os.getenv('FIREBASE_PROJECT_ID', '')
+
 
 # CORS Settings
 CORS_ALLOW_CREDENTIALS = True
