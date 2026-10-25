@@ -243,6 +243,10 @@ class TicketDetailView(generics.RetrieveUpdateDestroyAPIView):
                 update_fields.add("updated_at")
             ticket.save(update_fields=list(update_fields))
 
+        
+        if "status" in update_fields and ticket.status in DONE_STATUSES:
+            ticket.complete_open_tasks()
+
         if new_assignee and new_assignee != request.user:
             _safe_notify(
                 new_assignee, "ticket_assigned", f"Ticket assigned to you: {ticket.subject}",
@@ -551,6 +555,7 @@ class TaskDetailView(generics.RetrieveUpdateDestroyAPIView):
         if new_status and new_status != previous_status:
             task.set_status(new_status)
             task.save(update_fields=["status", "completed_at", "updated_at"])
+            task.sync_ticket()
 
         if task.assigned_to_id != previous_assignee and task.assigned_to != user:
             _safe_notify(

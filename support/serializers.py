@@ -309,6 +309,7 @@ class TaskSerializer(serializers.ModelSerializer):
     assigned_to_email = serializers.CharField(source="assigned_to.email", read_only=True)
     created_by_name = serializers.SerializerMethodField()
     ticket_subject = serializers.CharField(source="ticket.subject", read_only=True, default=None)
+    ticket_status = serializers.CharField(source="ticket.status", read_only=True, default=None)
     is_overdue = serializers.BooleanField(read_only=True)
     assigned_to = serializers.PrimaryKeyRelatedField(
         queryset=User.objects.filter(role__in=[User.Role.STAFF, User.Role.ADMIN], is_active=True),
@@ -321,7 +322,7 @@ class TaskSerializer(serializers.ModelSerializer):
         fields = [
             "id", "title", "description", "status", "priority", "due_date",
             "assigned_to", "assigned_to_name", "assigned_to_email",
-            "created_by", "created_by_name", "ticket", "ticket_subject",
+            "created_by", "created_by_name", "ticket", "ticket_subject", "ticket_status",
             "is_overdue", "completed_at", "created_at", "updated_at",
         ]
         read_only_fields = ["id", "created_by", "completed_at", "created_at", "updated_at"]

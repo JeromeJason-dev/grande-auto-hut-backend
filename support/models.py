@@ -88,6 +88,12 @@ class Ticket(models.Model):
         else:
             self.resolved_at = None
 
+    def complete_open_tasks(self):
+        now = timezone.now()
+        return self.tasks.exclude(status=Task.Status.DONE).update(
+            status=Task.Status.DONE, completed_at=now, updated_at=now,
+        )
+
 
 class TicketMessage(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -166,3 +172,28 @@ class Task(models.Model):
     def set_status(self, new_status):
         self.status = new_status
         self.completed_at = timezone.now() if new_status == self.Status.DONE else None
+
+    def sync_ticket(self):
+        ticket = self.ticket
+        if ticket is None or ticket.status == Ticket.Status.CLOSED:
+            return False
+
+        siblings = ticket.tasks.all()
+        if self.status == self.Status.DONE:
+            if siblings.exclude(status=self.Status.DONE).exists():
+                return False  # other tasks still outstanding
+            target = Ticket.Status.RESOLVED
+            if ticket.status == target:
+                return False
+        elif self.status == self.Status.IN_PROGRESS:
+            if ticket.status == Ticket.Status.IN_PROGRESS:
+                return False
+            target = Ticket.Status.IN_PROGRESS
+        else:  # back to "To do": only matters if it undoes a ticket that was resolved
+            if ticket.status != Ticket.Status.RESOLVED:
+                return False
+            target = Ticket.Status.IN_PROGRESS
+
+        ticket.set_status(target)
+        ticket.save(update_fields=["status", "resolved_at", "updated_at"])
+        return True
