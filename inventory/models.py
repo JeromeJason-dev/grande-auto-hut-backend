@@ -4,6 +4,7 @@ from django.db import models
 
 class InventoryTransaction(models.Model):
     class TransactionType(models.TextChoices):
+        ORDER_RESERVE = "order_reserve", "Order placed (stock reserved)"
         ORDER_CONFIRM = "order_confirm", "Order confirmed (stock reserved)"
         ORDER_CANCELLED_RESTOCK = "order_cancelled_restock", "Order cancelled (stock restored)"
         RESTOCK = "restock", "Restock / supplier delivery"

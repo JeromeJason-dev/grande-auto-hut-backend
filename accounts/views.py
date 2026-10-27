@@ -2,25 +2,31 @@ import logging
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.contrib.auth.tokens import default_token_generator
-from django.core.mail import send_mail
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import IntegrityError, transaction
-from django.utils.encoding import force_bytes, force_str
-from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
+from django.utils.encoding import force_str
+from django.utils.http import urlsafe_base64_decode
 from rest_framework import generics, status, viewsets, permissions
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.exceptions import TokenError
+from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, OutstandingToken
 from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token as google_id_token
 
+from .emails import read_verification_token, send_password_reset_email, send_verification_email
 from .models import Address
 from .permissions import IsOwnerOrStaff
+from .throttles import (
+    EmailVerifyThrottle, LoginEmailThrottle, LoginIPThrottle, PasswordResetEmailThrottle,
+    PasswordResetIPThrottle, RegisterThrottle,
+)
 from .serializers import (
     RegisterSerializer, MeSerializer, ProfileUpdateSerializer, ChangePasswordSerializer,
     PasswordResetRequestSerializer, PasswordResetConfirmSerializer, AddressSerializer,
-    AdminCustomerSerializer, GoogleAuthSerializer,
+    AdminCustomerSerializer, GoogleAuthSerializer, VerifyEmailSerializer,
 )
 
 User = get_user_model()
@@ -31,22 +37,41 @@ def _set_refresh_cookie(response, refresh_token: str):
     response.set_cookie(
         key=settings.REFRESH_COOKIE_NAME,
         value=str(refresh_token),
+        max_age=int(settings.SIMPLE_JWT["REFRESH_TOKEN_LIFETIME"].total_seconds()),
         httponly=True,
         secure=settings.REFRESH_COOKIE_SECURE,
         samesite=settings.REFRESH_COOKIE_SAMESITE,
+        domain=settings.REFRESH_COOKIE_DOMAIN,
         path="/api/auth/",
     )
+
+
+def _delete_refresh_cookie(response):
+    response.delete_cookie(
+        settings.REFRESH_COOKIE_NAME,
+        path="/api/auth/",
+        domain=settings.REFRESH_COOKIE_DOMAIN,
+        samesite=settings.REFRESH_COOKIE_SAMESITE,
+    )
+
+
+def _blacklist_all_refresh_tokens(user):
+    """Sign the user out everywhere (used after a password reset)."""
+    for outstanding in OutstandingToken.objects.filter(user=user):
+        BlacklistedToken.objects.get_or_create(token=outstanding)
 
 
 class RegisterView(generics.CreateAPIView):
     queryset = User.objects.all()
     serializer_class = RegisterSerializer
     permission_classes = [permissions.AllowAny]
+    throttle_classes = [RegisterThrottle]
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         user = serializer.save()
+        send_verification_email(user)
 
         from notifications.services import notify  # local import: avoids a hard app-load-order dependency
         notify(
@@ -56,7 +81,7 @@ class RegisterView(generics.CreateAPIView):
 
         return Response(
             {
-                "message": "Account created successfully. Please log in to get your token.",
+                "message": "Account created successfully. Check your email to confirm your address.",
                 "user": MeSerializer(user).data
             },
             status=status.HTTP_201_CREATED,
@@ -64,6 +89,9 @@ class RegisterView(generics.CreateAPIView):
 
 
 class LoginView(TokenObtainPairView):
+    # Per-IP and per-email limits: slows password guessing without locking real users out.
+    throttle_classes = [LoginIPThrottle, LoginEmailThrottle]
+
     def post(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -71,16 +99,9 @@ class LoginView(TokenObtainPairView):
         access = serializer.validated_data["access"]
         refresh = serializer.validated_data["refresh"]
 
-        # Include both tokens in the response body payload
-        response = Response(
-            {
-                "access": str(access),
-                "refresh": str(refresh),
-            },
-            status=status.HTTP_200_OK
-        )
-
-        # Keep setting the secure HttpOnly cookie as a backup/alternative auth method
+        # The refresh token travels ONLY in the httpOnly cookie, so page JavaScript
+        # (and therefore any XSS bug) can never read it.
+        response = Response({"access": str(access)}, status=status.HTTP_200_OK)
         _set_refresh_cookie(response, refresh)
         return response
 
@@ -171,7 +192,6 @@ class GoogleLoginView(APIView):
         response = Response(
             {
                 "access": str(refresh.access_token),
-                "refresh": str(refresh),
                 "created": created,
                 "user": MeSerializer(user).data,
             },
@@ -199,7 +219,6 @@ class RefreshView(TokenRefreshView):
 
         new_refresh = serializer.validated_data.get("refresh")
         if new_refresh:
-            response.data["refresh"] = str(new_refresh)
             _set_refresh_cookie(response, new_refresh)
 
         return response
@@ -216,7 +235,7 @@ class LogoutView(APIView):
             except TokenError:
                 pass
         response = Response(status=status.HTTP_204_NO_CONTENT)
-        response.delete_cookie(settings.REFRESH_COOKIE_NAME, path="/api/auth/")
+        _delete_refresh_cookie(response)
         return response
 
 
@@ -247,27 +266,24 @@ class ChangePasswordView(APIView):
 
 class PasswordResetRequestView(APIView):
     permission_classes = [permissions.AllowAny]
+    authentication_classes = []
+    throttle_classes = [PasswordResetIPThrottle, PasswordResetEmailThrottle]
 
     def post(self, request):
         serializer = PasswordResetRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         email = serializer.validated_data["email"]
-        user = User.objects.filter(email__iexact=email).first()
+        user = User.objects.filter(email__iexact=email, is_active=True).first()
         if user:
-            uid = urlsafe_base64_encode(force_bytes(user.pk))
-            token = default_token_generator.make_token(user)
-            reset_link = f"{settings.FRONTEND_URL}/reset-password?uid={uid}&token={token}"
-            send_mail(
-                subject="Reset your Grande Auto Hut password",
-                message=f"Click to reset your password: {reset_link}\nIf you didn't request this, ignore this email.",
-                from_email=settings.DEFAULT_FROM_EMAIL,
-                recipient_list=[user.email],
-            )
+            send_password_reset_email(user)
+        # Same answer whether or not the account exists, so this can't be used to find registered emails.
         return Response({"detail": "If that email exists, a reset link has been sent."})
 
 
 class PasswordResetConfirmView(APIView):
     permission_classes = [permissions.AllowAny]
+    authentication_classes = []
+    throttle_classes = [PasswordResetIPThrottle]
 
     def post(self, request):
         serializer = PasswordResetConfirmSerializer(data=request.data)
@@ -275,16 +291,56 @@ class PasswordResetConfirmView(APIView):
         data = serializer.validated_data
         try:
             uid = force_str(urlsafe_base64_decode(data["uid"]))
-            user = User.objects.get(pk=uid)
-        except (User.DoesNotExist, ValueError, TypeError, OverflowError):
+            user = User.objects.get(pk=uid, is_active=True)
+        except (User.DoesNotExist, ValueError, TypeError, OverflowError, DjangoValidationError):
             return Response({"detail": "Invalid reset link."}, status=status.HTTP_400_BAD_REQUEST)
 
         if not default_token_generator.check_token(user, data["token"]):
             return Response({"detail": "Invalid or expired reset link."}, status=status.HTTP_400_BAD_REQUEST)
 
         user.set_password(data["new_password"])
+        # Following the emailed link proves the person controls this address.
+        user.is_email_verified = True
         user.save()
-        return Response({"detail": "Password has been reset."})
+        # Anyone holding an old session (including a thief who knew the old password) is signed out.
+        _blacklist_all_refresh_tokens(user)
+        return Response({"detail": "Password has been reset. You can now log in."})
+
+
+class VerifyEmailView(APIView):
+    """POST /api/auth/verify-email/  Body: {"token": "..."} - from the link in the verification email."""
+    permission_classes = [permissions.AllowAny]
+    authentication_classes = []
+    throttle_classes = [EmailVerifyThrottle]
+
+    def post(self, request):
+        serializer = VerifyEmailSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        payload = read_verification_token(serializer.validated_data["token"])
+        if not payload:
+            return Response({"detail": "This verification link is invalid or has expired."},
+                            status=status.HTTP_400_BAD_REQUEST)
+        user = User.objects.filter(pk=payload.get("uid"), is_active=True).first()
+        if user is None or user.email.lower() != payload.get("email"):
+            return Response({"detail": "This verification link is invalid or has expired."},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if not user.is_email_verified:
+            user.is_email_verified = True
+            user.save(update_fields=["is_email_verified", "updated_at"])
+        return Response({"detail": "Email confirmed. Thank you!"})
+
+
+class ResendVerificationView(APIView):
+    """POST /api/auth/resend-verification/ - for the logged-in user."""
+    permission_classes = [permissions.IsAuthenticated]
+    throttle_classes = [EmailVerifyThrottle]
+
+    def post(self, request):
+        user = request.user
+        if user.is_email_verified:
+            return Response({"detail": "Your email is already confirmed."})
+        send_verification_email(user)
+        return Response({"detail": "Verification email sent. Check your inbox (and spam folder)."})
 
 
 class AddressViewSet(viewsets.ModelViewSet):

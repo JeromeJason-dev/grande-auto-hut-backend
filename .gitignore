@@ -1,3 +1,12 @@
 db.sqlite3
 __pycache__
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+staticfiles/
+media/
+.venv/
+venv/
+node_modules/

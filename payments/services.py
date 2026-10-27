@@ -9,7 +9,7 @@ import base64
 import datetime
 import hashlib
 import hmac
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, ROUND_CEILING, ROUND_HALF_UP
 from urllib.parse import quote
 
 import requests
@@ -18,6 +18,10 @@ from django.conf import settings
 
 class MpesaError(Exception):
     pass
+
+
+def mpesa_charge_amount(amount) -> int:
+    return int(Decimal(amount).to_integral_value(rounding=ROUND_CEILING))
 
 
 class MpesaClient:
@@ -68,7 +72,7 @@ class MpesaClient:
             "Password": password,
             "Timestamp": timestamp,
             "TransactionType": "CustomerPayBillOnline",
-            "Amount": int(amount),
+            "Amount": mpesa_charge_amount(amount),
             "PartyA": phone_number,
             "PartyB": settings.MPESA_SHORTCODE,
             "PhoneNumber": phone_number,
@@ -182,16 +186,54 @@ def valid_paystack_signature(raw_body: bytes, signature: str) -> bool:
     return hmac.compare_digest(expected, signature)
 
 
+def _after_successful_payment(order_id, confirm_note, reference):
+    import logging
+    from inventory.services import InsufficientStockError
+    from orders.models import Order
+    from orders.services import (
+        CheckoutError, InvalidTransitionError, StockUnavailableError,
+        confirm_order, flag_paid_order_needs_attention, reinstate_expired_order,
+    )
+
+    logger = logging.getLogger(__name__)
+    order = Order.objects.get(pk=order_id)
+
+    if order.status == Order.Status.CANCELLED:
+        if order.cancelled_by_expiry:
+            # Paid just after the unpaid hold ran out: put the order back if the stock is still there.
+            try:
+                order = reinstate_expired_order(order)
+            except (StockUnavailableError, InvalidTransitionError) as exc:
+                flag_paid_order_needs_attention(
+                    order, f"Paid ({reference}) after the stock hold expired and the item(s) were sold: {exc} Refund the customer."
+                )
+                return
+        else:
+            flag_paid_order_needs_attention(
+                order, f"Payment {reference} succeeded but the order was already cancelled. Refund the customer."
+            )
+            return
+
+    if order.status != Order.Status.PENDING:
+        return  # already confirmed / moved on: nothing to do
+
+    try:
+        confirm_order(order, note=confirm_note)
+    except (CheckoutError, InsufficientStockError, InvalidTransitionError) as exc:
+        logger.error("Order %s paid but could not auto-confirm: %s", order.order_number, exc)
+        flag_paid_order_needs_attention(order, f"Paid ({reference}) but could not be confirmed: {exc}")
+
+
 def finalize_card_payment(payment_id, tx: dict):
     import logging
     from django.db import transaction
-    from inventory.services import InsufficientStockError
     from orders.models import Order
-    from orders.services import CheckoutError, InvalidTransitionError, confirm_order
+    from orders.services import flag_paid_order_needs_attention
     from .models import Payment
 
     logger = logging.getLogger(__name__)
-    should_confirm = False
+    follow_up = None       # (order_id, confirm_note, reference) once a payment has succeeded
+    problem = None         # message for the admins when something needs a human
 
     with transaction.atomic():
         payment = Payment.objects.select_for_update(of=("self",)).select_related("order").get(pk=payment_id)
@@ -206,25 +248,28 @@ def finalize_card_payment(payment_id, tx: dict):
             if tx.get("amount") != expected_amount or (tx.get("currency") or settings.PAYSTACK_CURRENCY) != settings.PAYSTACK_CURRENCY:
                 payment.status = Payment.Status.FAILED
                 payment.save(update_fields=["status", "raw_callback", "updated_at"])
-                logger.error(
-                    "Card amount mismatch for order %s: expected %s %s got %s %s - needs manual review.",
-                    payment.order.order_number, expected_amount, settings.PAYSTACK_CURRENCY,
-                    tx.get("amount"), tx.get("currency"),
+                problem = (
+                    f"Card amount mismatch (ref {payment.card_reference}): expected {expected_amount} "
+                    f"{settings.PAYSTACK_CURRENCY} minor units, gateway reported {tx.get('amount')} {tx.get('currency')}. "
+                    "Money may have been taken - review manually."
                 )
-                return payment
+                logger.error("Order %s: %s", payment.order.order_number, problem)
+            else:
+                auth = tx.get("authorization") or {}
+                payment.status = Payment.Status.SUCCESS
+                payment.card_brand = (auth.get("brand") or auth.get("card_type") or "").strip()[:30]
+                payment.card_last4 = (auth.get("last4") or "")[:4]
+                payment.save(update_fields=["status", "card_brand", "card_last4", "raw_callback", "updated_at"])
 
-            auth = tx.get("authorization") or {}
-            payment.status = Payment.Status.SUCCESS
-            payment.card_brand = (auth.get("brand") or auth.get("card_type") or "").strip()[:30]
-            payment.card_last4 = (auth.get("last4") or "")[:4]
-            payment.save(update_fields=["status", "card_brand", "card_last4", "raw_callback", "updated_at"])
-
-            order = payment.order
-            if order.payments.filter(status=Payment.Status.SUCCESS).exclude(pk=payment.pk).exists():
-                logger.error("Order %s was paid twice (reference %s) - refund the duplicate.", order.order_number, payment.card_reference)
-            if order.status == Order.Status.CANCELLED:
-                logger.error("Order %s was cancelled but a card payment succeeded (reference %s) - refund needed.", order.order_number, payment.card_reference)
-            should_confirm = order.status == Order.Status.PENDING
+                order = payment.order
+                if order.payments.filter(status=Payment.Status.SUCCESS).exclude(pk=payment.pk).exists():
+                    problem = f"Order was paid twice (card ref {payment.card_reference}) - refund the duplicate."
+                    logger.error("Order %s: %s", order.order_number, problem)
+                follow_up = (
+                    order.pk,
+                    f"Paid by card ({payment.card_brand or 'card'} ending {payment.card_last4 or '----'}), ref {payment.card_reference}.",
+                    payment.card_reference,
+                )
 
         elif tx_status in ("failed", "abandoned", "reversed") and payment.status == Payment.Status.PENDING:
             payment.status = Payment.Status.FAILED
@@ -233,39 +278,23 @@ def finalize_card_payment(payment_id, tx: dict):
             # "ongoing" / "pending" / "queued": still in flight, leave it pending.
             payment.save(update_fields=["raw_callback", "updated_at"])
 
-    if should_confirm:
-        try:
-            confirm_order(payment.order, note=f"Paid by card ({payment.card_brand or 'card'} ending {payment.card_last4 or '----'}), ref {payment.card_reference}.")
-        except (CheckoutError, InsufficientStockError, InvalidTransitionError) as exc:
-            # Paid but stock ran out in the meantime - needs a human.
-            logger.error("Order %s paid by card but could not auto-confirm: %s", payment.order.order_number, exc)
+    if follow_up:
+        _after_successful_payment(*follow_up)
+    if problem:
+        flag_paid_order_needs_attention(payment.order, problem)
     return payment
 
 
 def finalize_mpesa_payment(payment_id, result_code, result_desc="", metadata=None, raw=None):
-    """
-    Applies a final M-Pesa outcome to a Payment. Used by BOTH the Safaricom
-    callback and the status-check endpoint, so the two can never disagree.
-    Idempotent: safe to call repeatedly, and in any order.
-
-    result_code 0 = paid; anything else = failed/cancelled.
-
-    A callback saying "paid" is authoritative even if we had already marked
-    the attempt failed (e.g. a superseded or timed-out prompt the customer
-    paid anyway) - the money has moved, so the record must say so.
-    The status query carries no amount/receipt, so those checks only run when
-    `metadata` (callback-only) is supplied.
-    """
     import logging
     from django.db import transaction
-    from inventory.services import InsufficientStockError
-    from orders.models import Order
-    from orders.services import CheckoutError, InvalidTransitionError, confirm_order
+    from orders.services import flag_paid_order_needs_attention
     from .models import Payment
 
     logger = logging.getLogger(__name__)
     metadata = metadata or {}
-    should_confirm = False
+    follow_up = None
+    problem = None
 
     with transaction.atomic():
         payment = Payment.objects.select_for_update(of=("self",)).select_related("order").get(pk=payment_id)
@@ -283,27 +312,29 @@ def finalize_mpesa_payment(payment_id, result_code, result_desc="", metadata=Non
 
         if result_code == 0:
             paid_amount = metadata.get("Amount")
-            # We send int(amount) to Daraja (whole shillings only), so compare against that.
+            # payment.amount is the whole-shilling figure we actually asked Daraja to collect.
             if paid_amount is not None and int(float(paid_amount)) != int(payment.amount):
                 payment.status = Payment.Status.FAILED
                 payment.save(update_fields=["status", "raw_callback", "updated_at"])
-                logger.error(
-                    "M-Pesa amount mismatch for order %s: expected %s got %s - needs manual review.",
-                    order.order_number, int(payment.amount), paid_amount,
+                problem = (
+                    f"M-Pesa amount mismatch: expected KES {int(payment.amount)}, customer paid KES {paid_amount} "
+                    f"(receipt {metadata.get('MpesaReceiptNumber', 'unknown')}). Money was taken - review manually."
                 )
-                return payment
+                logger.error("Order %s: %s", order.order_number, problem)
+            else:
+                payment.status = Payment.Status.SUCCESS
+                payment.mpesa_receipt_number = metadata.get("MpesaReceiptNumber", "") or payment.mpesa_receipt_number
+                payment.save(update_fields=["status", "mpesa_receipt_number", "raw_callback", "updated_at"])
 
-            payment.status = Payment.Status.SUCCESS
-            payment.mpesa_receipt_number = metadata.get("MpesaReceiptNumber", "") or payment.mpesa_receipt_number
-            payment.save(update_fields=["status", "mpesa_receipt_number", "raw_callback", "updated_at"])
-
-            if order.payments.filter(status=Payment.Status.SUCCESS).exclude(pk=payment.pk).exists():
-                logger.error("Order %s was paid twice (%s) - refund the duplicate.",
-                             order.order_number, payment.mpesa_checkout_request_id)
-            if order.status == Order.Status.CANCELLED:
-                logger.error("Order %s was cancelled but an M-Pesa payment succeeded (%s) - refund needed.",
-                             order.order_number, payment.mpesa_checkout_request_id)
-            should_confirm = order.status == Order.Status.PENDING
+                if order.payments.filter(status=Payment.Status.SUCCESS).exclude(pk=payment.pk).exists():
+                    problem = f"Order was paid twice (M-Pesa {payment.mpesa_checkout_request_id}) - refund the duplicate."
+                    logger.error("Order %s: %s", order.order_number, problem)
+                receipt = payment.mpesa_receipt_number
+                follow_up = (
+                    order.pk,
+                    f"Paid via M-Pesa{f', receipt {receipt}' if receipt else ''}.",
+                    receipt or payment.mpesa_checkout_request_id,
+                )
 
         elif payment.status == Payment.Status.PENDING:
             payment.status = Payment.Status.FAILED
@@ -313,14 +344,31 @@ def finalize_mpesa_payment(payment_id, result_code, result_desc="", metadata=Non
         else:
             payment.save(update_fields=["raw_callback", "updated_at"])
 
-    if should_confirm:
-        receipt = payment.mpesa_receipt_number
-        try:
-            confirm_order(order, note=f"Paid via M-Pesa{f', receipt {receipt}' if receipt else ''}.")
-        except (CheckoutError, InsufficientStockError, InvalidTransitionError) as exc:
-            # Paid, but stock ran out (or the order moved on) in the meantime - needs a human.
-            logger.error("Order %s paid but could not auto-confirm: %s", order.order_number, exc)
+    if follow_up:
+        _after_successful_payment(*follow_up)
+    if problem:
+        flag_paid_order_needs_attention(order, problem)
     return payment
+
+
+def settle_gateway_payments(order):
+    import logging
+    from .models import Payment
+
+    logger = logging.getLogger(__name__)
+    if order.payment_method == "mpesa":
+        reconcile_pending_mpesa_payments(order)
+    elif order.payment_method == "card":
+        pending = order.payments.filter(method="card", status=Payment.Status.PENDING) \
+            .exclude(card_reference__isnull=True).exclude(card_reference="")
+        for payment in pending:
+            try:
+                tx = PaystackClient().verify(payment.card_reference)
+            except CardPaymentError as exc:
+                logger.warning("Card check failed for order %s: %s", order.order_number, exc)
+                continue
+            if tx.get("reference") == payment.card_reference:
+                finalize_card_payment(payment.pk, tx)
 
 
 def reconcile_pending_mpesa_payments(order):
@@ -478,6 +526,7 @@ def refund_order_payment(order, user, reason, reference="", payment_id=None):
     from notifications.services import notify
     notify(
         order.user, "order_update", f"Refund recorded for {order.order_number}",
-        f"A refund of KES {payment.amount:,.2f} has been recorded for order {order.order_number}.",
+        f"A refund of KES {payment.amount:,.2f} has been approved for order {order.order_number}. "
+        f"We will send it back to you and contact you if we need anything else.",
     )
     return order

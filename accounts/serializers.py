@@ -86,3 +86,7 @@ class AdminCustomerSerializer(serializers.ModelSerializer):
 
 class GoogleAuthSerializer(serializers.Serializer):
     id_token = serializers.CharField(write_only=True)
+
+
+class VerifyEmailSerializer(serializers.Serializer):
+    token = serializers.CharField()

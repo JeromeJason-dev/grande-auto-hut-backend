@@ -12,9 +12,11 @@ https://docs.djangoproject.com/en/6.1/ref/settings/
 
 import os
 import sys
+import warnings
 from datetime import timedelta
 from pathlib import Path
 import dj_database_url
+from django.core.exceptions import ImproperlyConfigured
 from dotenv import load_dotenv
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -45,12 +47,49 @@ def env_int(key, default=0):
     return int(os.getenv(key, default))
 
 
-# Quick-start development settings - unsuitable for production
+# Core / security
+#
+# Production-safe by default: DEBUG is OFF unless you explicitly turn it on
+
+DEBUG = env_bool('DJANGO_DEBUG', env_bool('DEBUG', False))
+TESTING = 'test' in sys.argv
+
 SECRET_KEY = os.getenv('DJANGO_SECRET_KEY')
+if not SECRET_KEY:
+    if DEBUG or TESTING:
+        SECRET_KEY = 'django-insecure-local-development-only-do-not-use-in-production'
+    else:
+        raise ImproperlyConfigured(
+            "DJANGO_SECRET_KEY is not set. Generate one with: "
+            "python -c \"from django.core.management.utils import get_random_secret_key as g; print(g())\""
+        )
 
-DEBUG = env_bool('DJANGO_DEBUG', env_bool('DEBUG', True))
+ALLOWED_HOSTS = env_list('DJANGO_ALLOWED_HOSTS', 'localhost,127.0.0.1,testserver' if (DEBUG or TESTING) else '')
+_render_host = os.getenv('RENDER_EXTERNAL_HOSTNAME')
+if _render_host and _render_host not in ALLOWED_HOSTS:
+    ALLOWED_HOSTS.append(_render_host)
 
-ALLOWED_HOSTS = ['*']
+# Behind Render's TLS-terminating proxy the request arrives as plain HTTP with
+# X-Forwarded-Proto set; trust that header so Django knows the request was HTTPS.
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+SECURE_SSL_REDIRECT = env_bool('SECURE_SSL_REDIRECT', not (DEBUG or TESTING))
+SESSION_COOKIE_SECURE = not (DEBUG or TESTING)
+CSRF_COOKIE_SECURE = not (DEBUG or TESTING)
+SECURE_HSTS_SECONDS = env_int('SECURE_HSTS_SECONDS', 0 if (DEBUG or TESTING) else 31536000)
+SECURE_HSTS_INCLUDE_SUBDOMAINS = env_bool('SECURE_HSTS_INCLUDE_SUBDOMAINS', not (DEBUG or TESTING))
+# Preloading is effectively irreversible, so it is a deliberate opt-in.
+SECURE_HSTS_PRELOAD = env_bool('SECURE_HSTS_PRELOAD', False)
+SILENCED_SYSTEM_CHECKS = ['security.W021'] if not SECURE_HSTS_PRELOAD else []
+SECURE_CONTENT_TYPE_NOSNIFF = True
+X_FRAME_OPTIONS = 'DENY'
+CSRF_TRUSTED_ORIGINS = env_list('CSRF_TRUSTED_ORIGINS', '')
+
+# The Django admin lives at a non-default path (set ADMIN_URL to something private).
+ADMIN_URL = os.getenv('ADMIN_URL', 'admin/').strip('/') + '/'
+
+# Behind N reverse proxies DRF needs to know how many to skip to find the real
+# client IP (used by the throttles). 
+NUM_PROXIES = env_int('NUM_PROXIES', 1)
 
 
 # Cloudinary (permanent product-image storage).
@@ -130,8 +169,14 @@ WSGI_APPLICATION = 'auto_project.wsgi.application'
 
 
 # Database
+_database_url = os.getenv('DATABASE_URL')
+if not _database_url:
+    if DEBUG or TESTING:
+        _database_url = f"sqlite:///{BASE_DIR / 'db.sqlite3'}"
+    else:
+        raise ImproperlyConfigured("DATABASE_URL is not set.")
 DATABASES = {
-    "default": dj_database_url.parse(os.getenv('DATABASE_URL'))
+    "default": dj_database_url.parse(_database_url, conn_max_age=600)
 }
 
 
@@ -186,7 +231,13 @@ REST_FRAMEWORK = {
     'DEFAULT_THROTTLE_RATES': {
         'anon': '60/minute',
         'user': '300/minute',
+        'login_ip': '20/minute',
+        'login_email': '5/minute',
+        'register': '10/hour',
+        'password_reset': '5/hour',
+        'email_verify': '10/hour',
     },
+    'NUM_PROXIES': NUM_PROXIES,
 }
 
 
@@ -201,11 +252,13 @@ SIMPLE_JWT = {
 }
 
 
-# Refresh-token cookie settings used by accounts.views
+# Refresh-token cookie settings used by accounts.views.
+
 REFRESH_COOKIE_NAME = os.getenv('REFRESH_COOKIE_NAME', 'gah_refresh_token')
-REFRESH_COOKIE_SECURE = env_bool('REFRESH_COOKIE_SECURE', not DEBUG)
-# Cross-site deployment (Vercel frontend + Render backend) requires SameSite='None'
-REFRESH_COOKIE_SAMESITE = os.getenv('REFRESH_COOKIE_SAMESITE', 'None' if not DEBUG else 'Lax')
+REFRESH_COOKIE_SAMESITE = os.getenv('REFRESH_COOKIE_SAMESITE', 'Lax')
+REFRESH_COOKIE_SECURE = env_bool('REFRESH_COOKIE_SECURE', not (DEBUG or TESTING)) or REFRESH_COOKIE_SAMESITE == 'None'
+# Optional, e.g. ".grandeautohut.co.ke". Leave empty for a host-only cookie.
+REFRESH_COOKIE_DOMAIN = os.getenv('REFRESH_COOKIE_DOMAIN') or None
 
 # Firebase (Google sign-in). Only the project ID is needed to verify ID tokens.
 FIREBASE_PROJECT_ID = os.getenv('FIREBASE_PROJECT_ID', '').strip()
@@ -213,9 +266,10 @@ FIREBASE_PROJECT_ID = os.getenv('FIREBASE_PROJECT_ID', '').strip()
 
 # CORS Settings
 CORS_ALLOW_CREDENTIALS = True
+_dev_origins = 'http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173'
 CORS_ALLOWED_ORIGINS = env_list(
-    'CORS_ALLOWED_ORIGINS', 
-    'http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173,https://grande-auto-hut-frontend-sigma.vercel.app'
+    'CORS_ALLOWED_ORIGINS',
+    'https://grande-auto-hut-frontend-sigma.vercel.app' + (',' + _dev_origins if (DEBUG or TESTING) else ''),
 )
 
 
@@ -265,6 +319,9 @@ LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,
     "handlers": {"console": {"class": "logging.StreamHandler"}},
+    # Root logger: payments/orders/accounts messages (including the
+    # "paid but could not confirm" alerts) reach the Render log stream.
+    "root": {"handlers": ["console"], "level": "INFO"},
     "loggers": {
         "django.request": {"handlers": ["console"], "level": "ERROR", "propagate": False},
     },
@@ -286,9 +343,65 @@ PAYSTACK_CURRENCY = os.getenv('PAYSTACK_CURRENCY', 'KES')
 PAYSTACK_BASE_URL = os.getenv('PAYSTACK_BASE_URL', 'https://api.paystack.co')
 
 
+# Email (password reset, email verification, order notifications)
+
+EMAIL_HOST = os.getenv('EMAIL_HOST', '')
+EMAIL_PORT = env_int('EMAIL_PORT', 587)
+EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER', '')
+EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD', '')
+EMAIL_USE_TLS = env_bool('EMAIL_USE_TLS', True)
+EMAIL_USE_SSL = env_bool('EMAIL_USE_SSL', False)
+EMAIL_TIMEOUT = env_int('EMAIL_TIMEOUT', 10)
+DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', 'Grande Auto Hut <no-reply@grandeautohut.co.ke>')
+SERVER_EMAIL = os.getenv('SERVER_EMAIL', DEFAULT_FROM_EMAIL)
+
+if TESTING:
+    EMAIL_BACKEND = 'django.core.mail.backends.locmem.EmailBackend'
+elif os.getenv('EMAIL_BACKEND'):
+    EMAIL_BACKEND = os.environ['EMAIL_BACKEND']
+elif EMAIL_HOST:
+    EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
+else:
+    EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+    if not DEBUG:
+        warnings.warn(
+            "EMAIL_HOST is not set: password-reset and verification emails are only printed "
+            "to the server log. Configure an SMTP provider before launch.",
+            RuntimeWarning,
+        )
+
+# Who is alerted when a customer has paid but the order cannot be confirmed
+# (e.g. the stock was gone). In-app alerts also go to every admin user.
+ADMIN_ALERT_EMAILS = env_list('ADMIN_ALERT_EMAILS', '')
+
+# Password-reset links expire after 1 hour (Django's default is 3 days).
+PASSWORD_RESET_TIMEOUT = env_int('PASSWORD_RESET_TIMEOUT', 3600)
+# Email-verification links stay valid for 3 days.
+EMAIL_VERIFICATION_MAX_AGE = env_int('EMAIL_VERIFICATION_MAX_AGE', 3 * 24 * 3600)
+# Customers who signed up with a password must verify their email before they can
+# place an order. (Google sign-in accounts are verified automatically.)
+REQUIRE_EMAIL_VERIFICATION = env_bool('REQUIRE_EMAIL_VERIFICATION', True)
+
+# Stock reservation
+
+# Stock is taken off the shelf at checkout and held for this many minutes while
+
+STOCK_RESERVATION_MINUTES = env_int('STOCK_RESERVATION_MINUTES', 30)
+# Starting a payment pushes the hold out to at least this many minutes from now.
+STOCK_RESERVATION_PAYMENT_GRACE_MINUTES = env_int('STOCK_RESERVATION_PAYMENT_GRACE_MINUTES', 15)
+
+# Error tracking (optional): set SENTRY_DSN in Render to switch it on.
+SENTRY_DSN = os.getenv('SENTRY_DSN', '')
+if SENTRY_DSN:
+    import sentry_sdk
+    sentry_sdk.init(
+        dsn=SENTRY_DSN,
+        environment=os.getenv('SENTRY_ENVIRONMENT', 'production' if not DEBUG else 'development'),
+        traces_sample_rate=float(os.getenv('SENTRY_TRACES_SAMPLE_RATE', '0')),
+        send_default_pii=False,
+    )
+
 # Default Primary Key Field Type
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
-
-EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
 
 FRONTEND_URL = os.getenv("FRONTEND_URL", "https://grande-auto-hut-frontend-sigma.vercel.app").rstrip("/")

@@ -153,6 +153,7 @@ class OrderDetailSerializer(CustomerFieldsMixin, serializers.ModelSerializer):
             "customer_name", "customer_email",
             "recipient_name", "phone_number", "county", "town", "street_address", "building_or_estate",
             "subtotal", "shipping_fee", "total", "items", "status_history", "created_at", "updated_at",
+            "reservation_expires_at", "attention_note",
         ]
 
 

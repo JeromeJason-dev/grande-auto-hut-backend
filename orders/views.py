@@ -5,7 +5,8 @@ from django.db.models.functions import Coalesce
 from django.shortcuts import get_object_or_404
 from rest_framework import generics, permissions, status, views
 from rest_framework.response import Response
-from rest_framework.exceptions import ValidationError
+from django.conf import settings
+from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.pagination import PageNumberPagination
 from django_filters.rest_framework import DjangoFilterBackend
 from accounts.permissions import IsStaffOrAdmin
@@ -76,6 +77,16 @@ class CheckoutView(views.APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request):
+        user = request.user
+        if (
+            settings.REQUIRE_EMAIL_VERIFICATION
+            and not user.is_staff_role
+            and not user.is_email_verified
+        ):
+            raise PermissionDenied(
+                "Please confirm your email address before placing an order. "
+                "We emailed you a link when you signed up - use the \"Resend email\" button at the top of the page to get a new one."
+            )
         serializer = CheckoutSerializer(data=request.data, context={"request": request})
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data

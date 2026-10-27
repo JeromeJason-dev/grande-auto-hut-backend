@@ -12,6 +12,7 @@ from rest_framework.exceptions import ValidationError, PermissionDenied
 from accounts.permissions import IsAdmin, IsStaffOrAdmin
 
 from orders.models import Order
+from orders.services import extend_reservation
 from .models import Payment, PaymentAuditLog
 from .serializers import (
     CardInitiateSerializer, CardVerifySerializer, ManualPaymentSerializer, MpesaInitiateSerializer,
@@ -20,8 +21,8 @@ from .serializers import (
 from .services import (
     CardPaymentError, MpesaClient, MpesaError, PaymentActionError, PaystackClient,
     extract_callback_metadata, finalize_card_payment, finalize_mpesa_payment,
-    mark_order_paid_manually, reconcile_pending_mpesa_payments, recheck_order_payments,
-    refund_order_payment, valid_paystack_signature,
+    mark_order_paid_manually, mpesa_charge_amount, reconcile_pending_mpesa_payments,
+    recheck_order_payments, refund_order_payment, valid_paystack_signature,
 )
 
 logger = logging.getLogger(__name__)
@@ -55,11 +56,13 @@ class MpesaInitiateView(views.APIView):
             raise ValidationError("This order has already been paid.")
 
         phone_number = serializer.validated_data["phone_number"]
+        charge = mpesa_charge_amount(order.total)  
+        extend_reservation(order)  
 
         try:
             response = MpesaClient().stk_push(
                 phone_number=phone_number,
-                amount=order.total,
+                amount=charge,
                 account_reference=order.order_number,
                 transaction_desc=f"Grande Auto Hut order {order.order_number}",
             )
@@ -71,7 +74,7 @@ class MpesaInitiateView(views.APIView):
             order=order,
             method="mpesa",
             status=Payment.Status.PENDING,
-            amount=order.total,
+            amount=charge,
             phone_number=phone_number,
             mpesa_merchant_request_id=response.get("MerchantRequestID", ""),
             mpesa_checkout_request_id=response.get("CheckoutRequestID", ""),
@@ -170,6 +173,7 @@ class CardInitiateView(views.APIView):
         if order.payments.filter(status=Payment.Status.SUCCESS).exists():
             raise ValidationError("This order has already been paid.")
 
+        extend_reservation(order)  # keep the stock held while the customer pays
         reference = f"{order.order_number}-{uuid.uuid4().hex[:10]}"
         try:
             client = PaystackClient()
@@ -292,6 +296,14 @@ def _order_payments_payload(order, user, detail=None):
         "can_recheck": order.payment_method != "cod" and bool(payments),
         "can_mark_paid": is_admin and not has_success and order.status != Order.Status.CANCELLED,
         "can_refund": is_admin and has_success,
+        "attention_note": order.attention_note,
+        # Recording a refund does not move any money; staff must send it themselves.
+        "refund_is_manual": True,
+        "refund_note": (
+            "Recording a refund only updates our records. It does NOT send money back through "
+            "M-Pesa or Paystack - send the refund manually (M-Pesa app / Paystack dashboard) first, "
+            "then record it here with the transaction reference."
+        ),
     }
     if detail:
         payload["detail"] = detail
@@ -352,4 +364,4 @@ class OrderPaymentRefundView(views.APIView):
             )
         except PaymentActionError as exc:
             raise ValidationError(str(exc))
-        return Response(_order_payments_payload(order, request.user, detail="Refund recorded and the customer notified."))
+        return Response(_order_payments_payload(order, request.user, detail="Refund recorded and the customer notified. Remember: no money has been sent automatically - complete the refund in M-Pesa or Paystack."))

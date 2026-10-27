@@ -29,8 +29,15 @@ class OrderStatusHistoryInline(admin.TabularInline):
 
 @admin.register(Order)
 class OrderAdmin(admin.ModelAdmin):
-    list_display = ("order_number", "user", "status", "payment_method", "total", "created_at")
-    list_filter = ("status", "payment_method")
+    list_display = ("order_number", "user", "status", "payment_method", "total", "stock_reserved", "needs_attention", "created_at")
+    list_filter = ("status", "payment_method", "stock_reserved", "cancelled_by_expiry")
     search_fields = ("order_number", "user__email")
-    readonly_fields = ("order_number", "subtotal", "shipping_fee", "total", "created_at", "updated_at")
+    readonly_fields = (
+        "order_number", "subtotal", "shipping_fee", "total", "stock_reserved",
+        "reservation_expires_at", "cancelled_by_expiry", "created_at", "updated_at",
+    )
+
+    @admin.display(boolean=True, description="Needs attention")
+    def needs_attention(self, obj):
+        return bool(obj.attention_note)
     inlines = [OrderItemInline, OrderStatusHistoryInline]

@@ -3,20 +3,27 @@ Bulk-import products into Grande Auto Hut from a CSV file.
 
 Usage:
     pip install requests
-    python bulk_import_products.py
+    export GAH_API_URL="http://localhost:8000/api"     # or the live API URL
+    export GAH_EMAIL="staff-or-admin@example.com"
+    export GAH_PASSWORD="..."                          # never commit this
+    python Bulk_import_products.py
 
-Edit the SETTINGS block first. Run it against a local backend before production.
+Credentials are read from environment variables only. If GAH_PASSWORD is not
+set you are prompted for it, so nothing secret ever has to live in this file.
+Run it against a local backend before production.
 """
 import csv
+import getpass
+import os
 import sys
 import requests
 
-# ---------------- SETTINGS ----------------
-API = "https://grande-auto-hut-backend.onrender.com/api"      
-EMAIL = "Njeri@gmail.com"            
-PASSWORD = "Njeri@123"
-CSV_FILE = "products.csv"
-# ------------------------------------------
+# ---------------- SETTINGS (from the environment) ----------------
+API = os.environ.get("GAH_API_URL", "https://grande-auto-hut-backend.onrender.com").rstrip("/")
+EMAIL = os.environ.get("GAH_EMAIL") or input("Staff/Admin email: ").strip()
+PASSWORD = os.environ.get("GAH_PASSWORD") or getpass.getpass("Password: ")
+CSV_FILE = os.environ.get("GAH_CSV_FILE", "products.csv")
+# -----------------------------------------------------------------
 
 session = requests.Session()
 

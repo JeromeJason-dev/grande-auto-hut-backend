@@ -5,8 +5,13 @@ Put the images in a folder called product_images/ and name them after the SKU:
     BRK-001.jpg        -> main picture for BRK-001
     BRK-001_2.jpg      -> extra picture
     BRK-001_3.png      -> extra picture
-Run:  python bulk_upload_images.py
+Run:
+    export GAH_API_URL="http://localhost:8000/api"     # or the live API URL
+    export GAH_EMAIL="staff-or-admin@example.com"
+    export GAH_PASSWORD="..."                          # optional: you are prompted if unset
+    python Bulk_upload_images.py
 Products that already have pictures are skipped, so it is safe to re-run.
+Credentials come from environment variables only; never hardcode them here.
 """
 import getpass
 import os
@@ -14,10 +19,10 @@ import re
 import sys
 import requests
 
-API = "https://grande-auto-hut-backend.onrender.com/api"
-EMAIL = input("Staff/Admin email: ").strip()
-PASSWORD = getpass.getpass("Password: ")
-FOLDER = "product_images"
+API = os.environ.get("GAH_API_URL", "https://grande-auto-hut-backend.onrender.com").rstrip("/")
+EMAIL = os.environ.get("GAH_EMAIL") or input("Staff/Admin email: ").strip()
+PASSWORD = os.environ.get("GAH_PASSWORD") or getpass.getpass("Password: ")
+FOLDER = os.environ.get("GAH_IMAGE_FOLDER", "product_images")
 EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 
 s = requests.Session()
