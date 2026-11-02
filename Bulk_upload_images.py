@@ -3,88 +3,129 @@ Upload product pictures to Grande Auto Hut.
 
 Put the images in a folder called product_images/ and name them after the SKU:
     BRK-001.jpg        -> main picture for BRK-001
-    BRK-001_2.jpg      -> extra picture
+    BRK-001_2.jpg      -> extra picture (shown after the main one)
     BRK-001_3.png      -> extra picture
-Run:
-    export GAH_API_URL="http://localhost:8000/api"     # or the live API URL
-    export GAH_EMAIL="staff-or-admin@example.com"
-    export GAH_PASSWORD="..."                          # optional: you are prompted if unset
-    python Bulk_upload_images.py
-Products that already have pictures are skipped, so it is safe to re-run.
-Credentials come from environment variables only; never hardcode them here.
+Accepted: .jpg .jpeg .png .webp, max 5 MB each (the server's limit).
+The SKU match is case-insensitive.
+
+Usage:
+    pip install requests
+    python Bulk_upload_images.py --dry-run     # shows what would be uploaded; no login
+    python Bulk_upload_images.py               # upload for real
+
+Credentials / API address come from environment variables, a git-ignored
+.env.bulk file, or a prompt. Never hardcode them here. See gah_client.py.
+
+Safe to re-run: products that already have a picture are skipped (including
+inactive products). To replace pictures, delete them in the Django admin first.
 """
-import getpass
+import argparse
 import os
 import re
 import sys
-import requests
 
-API = os.environ.get("GAH_API_URL", "https://grande-auto-hut-backend.onrender.com").rstrip("/")
-EMAIL = os.environ.get("GAH_EMAIL") or input("Staff/Admin email: ").strip()
-PASSWORD = os.environ.get("GAH_PASSWORD") or getpass.getpass("Password: ")
-FOLDER = os.environ.get("GAH_IMAGE_FOLDER", "product_images")
-EXTS = {".jpg", ".jpeg", ".png", ".webp"}
+from Gah_client import Client, short
 
-s = requests.Session()
+EXTS = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp"}
+MAX_BYTES = 5 * 1024 * 1024  # matches MAX_IMAGE_BYTES in catalog/serializers.py
 
 
-def login():
-    r = s.post(f"{API}/auth/login/", json={"email": EMAIL, "password": PASSWORD}, timeout=90)
-    r.raise_for_status()
-    s.headers["Authorization"] = f"Bearer {r.json()['access']}"
+def natural_key(text):
+    return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", text)]
 
 
-def sku_to_slug():
-    out, url = {}, f"{API}/products/"
-    while url:
-        r = s.get(url, timeout=90)
-        r.raise_for_status()
-        data = r.json()
-        for p in data["results"]:
-            out[p["sku"]] = p["slug"]
-        url = data.get("next")
-    return out
+def group_by_sku(folder, known_skus):
+    """{sku_lower: [filenames in upload order]}. 'BRK-001' is the main picture,
+    'BRK-001_2', 'BRK-001_3' ... follow in numeric order. If the full file name
+    is itself a real SKU (e.g. a SKU that ends in _2) it is treated as that SKU."""
+    groups = {}
+    for name in os.listdir(folder):
+        base, ext = os.path.splitext(name)
+        if ext.lower() not in EXTS or name.startswith("."):
+            continue
+        if base.lower() in known_skus:
+            sku, order = base.lower(), 1
+        else:
+            m = re.match(r"^(.*?)_(\d+)$", base)
+            sku, order = (m.group(1).lower(), int(m.group(2))) if m else (base.lower(), 1)
+        groups.setdefault(sku, []).append((order, natural_key(name), name))
+    return {sku: [n for _o, _k, n in sorted(items)] for sku, items in groups.items()}
 
 
 def main():
-    login()
-    slugs = sku_to_slug()
+    ap = argparse.ArgumentParser(description="Bulk-upload product images named after SKUs.")
+    ap.add_argument("--folder", default=os.environ.get("GAH_IMAGE_FOLDER", "product_images"))
+    ap.add_argument("--dry-run", action="store_true", help="list what would be uploaded; no login, nothing sent")
+    args = ap.parse_args()
 
-    # group files by SKU: BRK-001.jpg and BRK-001_2.jpg both belong to BRK-001
-    groups = {}
-    for name in sorted(os.listdir(FOLDER)):
-        base, ext = os.path.splitext(name)
-        if ext.lower() not in EXTS:
-            continue
-        sku = re.sub(r"_\d+$", "", base)
-        groups.setdefault(sku, []).append(name)
+    if not os.path.isdir(args.folder):
+        sys.exit(f"Image folder not found: {args.folder}")
 
+    if args.dry_run:
+        groups = group_by_sku(args.folder, set())
+        for sku, files in sorted(groups.items()):
+            print(f"{sku}: {', '.join(files)}")
+        print(f"\nDry run: {sum(len(f) for f in groups.values())} image(s) for {len(groups)} SKU(s). Nothing was sent.")
+        return
+
+    client = Client()
     ok = failed = skipped = 0
-    for sku, files in groups.items():
-        slug = slugs.get(sku)
-        if not slug:
-            print(f"{sku}: no product with this SKU, skipped")
-            skipped += 1
-            continue
-        detail = s.get(f"{API}/products/{slug}/", timeout=90).json()
-        if detail.get("images"):
-            print(f"{sku}: already has pictures, skipped")
-            skipped += 1
-            continue
-        for i, name in enumerate(files):
-            with open(os.path.join(FOLDER, name), "rb") as f:
-                r = s.post(
-                    f"{API}/products/{slug}/images/",
-                    data={"alt_text": detail["name"], "is_primary": "true" if i == 0 else "false", "sort_order": i},
-                    files={"image": f},
-                    timeout=120,
+    try:
+        client.login()
+        products = {p["sku"].lower(): p for p in client.fetch_products()}  # includes inactive
+        groups = group_by_sku(args.folder, set(products))
+
+        for sku, files in sorted(groups.items()):
+            product = products.get(sku)
+            if not product:
+                print(f"{sku}: no product with this SKU (import products first), skipped")
+                skipped += 1
+                continue
+            if product.get("primary_image"):
+                print(f"{product['sku']}: already has pictures, skipped")
+                skipped += 1
+                continue
+
+            uploaded_here = 0
+            for i, name in enumerate(files):
+                path = os.path.join(args.folder, name)
+                size = os.path.getsize(path)
+                if size > MAX_BYTES:
+                    print(f"{product['sku']}: FAILED {name} -> {size / 1048576:.1f} MB is over the 5 MB limit")
+                    failed += 1
+                    continue
+                if size == 0:
+                    print(f"{product['sku']}: FAILED {name} -> file is empty")
+                    failed += 1
+                    continue
+                with open(path, "rb") as f:
+                    content = f.read()  # bytes, so a retry can re-send it
+                ext = os.path.splitext(name)[1].lower()
+                r = client.post(
+                    f"products/{product['slug']}/images",
+                    data={
+                        "alt_text": product["name"][:255],
+                        "is_primary": "true" if uploaded_here == 0 else "false",
+                        "sort_order": uploaded_here,
+                    },
+                    files={"image": (name, content, EXTS[ext])},
+                    timeout=(15, 180),
                 )
-            if r.status_code == 201:
-                print(f"{sku}: uploaded {name}")
-                ok += 1
-            else:
-                print(f"{sku}: FAILED {name} -> {r.status_code} {r.text[:200]}")
-                failed += 1
+                if r.status_code == 201:
+                    print(f"{product['sku']}: uploaded {name}")
+                    ok += 1
+                    uploaded_here += 1
+                else:
+                    print(f"{product['sku']}: FAILED {name} -> {r.status_code} {short(r)}")
+                    failed += 1
+
+        no_pictures = [p["sku"] for k, p in products.items() if not p.get("primary_image") and k not in groups]
+        if no_pictures:
+            shown = ", ".join(no_pictures[:15]) + (" ..." if len(no_pictures) > 15 else "")
+            print(f"\nProducts with no image file in {args.folder}/: {shown}")
+    finally:
+        client.close()
+
     print(f"\nDone. Uploaded {ok}, skipped {skipped}, failed {failed}.")
     sys.exit(1 if failed else 0)
 

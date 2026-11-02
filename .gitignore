@@ -9,4 +9,5 @@ staticfiles/
 media/
 .venv/
 venv/
-node_modules/
+.env.bulk
+failed_*.csv
