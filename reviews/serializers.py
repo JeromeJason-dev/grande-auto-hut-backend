@@ -1,80 +1,166 @@
+from django.utils.text import slugify
 from rest_framework import serializers
-from orders.models import Order, OrderItem
-from .models import Review
+from .models import Category, Brand, Product, ProductImage
 
 
-class ReviewSerializer(serializers.ModelSerializer):
-    user_name = serializers.SerializerMethodField()
-    verified_purchase = serializers.BooleanField(source="order_item", read_only=True)
-
-    class Meta:
-        model = Review
-        fields = ["id", "user_name", "product", "rating", "comment", "verified_purchase", "created_at"]
-        read_only_fields = fields
-
-    def get_user_name(self, obj):
-        first = obj.user.first_name
-        return first if first else obj.user.email.split("@")[0]
+def unique_slug(model, name, slug_field="slug"):
+    base = slugify(name)
+    slug = base
+    suffix = 1
+    while model.objects.filter(**{slug_field: slug}).exists():
+        suffix += 1
+        slug = f"{base}-{suffix}"
+    return slug
 
 
-class StaffReviewSerializer(serializers.ModelSerializer):
-    """Everything the support team needs to read a review in context (staff/admin only)."""
-    product_name = serializers.CharField(source="product.name", read_only=True)
-    product_slug = serializers.CharField(source="product.slug", read_only=True)
-    product_sku = serializers.CharField(source="product.sku", read_only=True)
-    customer_name = serializers.SerializerMethodField()
-    customer_email = serializers.CharField(source="user.email", read_only=True)
-    verified_purchase = serializers.SerializerMethodField()
-    order_number = serializers.SerializerMethodField()
+class CategorySerializer(serializers.ModelSerializer):
+    slug = serializers.SlugField(max_length=140, required=False, help_text="Auto-generated from name if omitted.")
 
     class Meta:
-        model = Review
-        fields = [
-            "id", "product", "product_name", "product_slug", "product_sku",
-            "customer_name", "customer_email", "rating", "comment",
-            "verified_purchase", "order_number", "created_at", "updated_at",
-        ]
-        read_only_fields = fields
-
-    def get_customer_name(self, obj):
-        return (obj.user.get_full_name() or "").strip() or obj.user.email.split("@")[0]
-
-    def get_verified_purchase(self, obj):
-        return obj.order_item_id is not None
-
-    def get_order_number(self, obj):
-        return obj.order_item.order.order_number if obj.order_item_id else None
-
-
-class ReviewWriteSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Review
-        fields = ["id", "product", "rating", "comment"]
-        read_only_fields = ["id"]
-
-    def validate(self, attrs):
-        request = self.context["request"]
-        product = attrs["product"]
-
-        if Review.objects.filter(user=request.user, product=product).exists():
-            raise serializers.ValidationError("You've already reviewed this product.")
-
-        delivered_item = (
-            OrderItem.objects.filter(
-                order__user=request.user,
-                order__status=Order.Status.DELIVERED,
-                product=product,
-            )
-            .order_by("-order__created_at")
-            .first()
-        )
-        if not delivered_item:
-            raise serializers.ValidationError(
-                "You can only review products from an order that has been delivered to you."
-            )
-        attrs["_order_item"] = delivered_item
-        return attrs
+        model = Category
+        fields = ["id", "name", "slug", "parent", "is_active"]
 
     def create(self, validated_data):
-        order_item = validated_data.pop("_order_item")
-        return Review.objects.create(user=self.context["request"].user, order_item=order_item, **validated_data)
+        if not validated_data.get("slug"):
+            validated_data["slug"] = unique_slug(Category, validated_data["name"])
+        return super().create(validated_data)
+
+
+class BrandSerializer(serializers.ModelSerializer):
+    slug = serializers.SlugField(max_length=140, required=False, help_text="Auto-generated from name if omitted.")
+
+    class Meta:
+        model = Brand
+        fields = ["id", "name", "slug", "logo", "is_active"]
+
+    def create(self, validated_data):
+        if not validated_data.get("slug"):
+            validated_data["slug"] = unique_slug(Brand, validated_data["name"])
+        return super().create(validated_data)
+
+
+MAX_IMAGE_BYTES = 5 * 1024 * 1024
+
+
+class ProductImageSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ProductImage
+        fields = ["id", "image", "alt_text", "is_primary", "sort_order"]
+
+    def validate_image(self, value):
+        if value.size > MAX_IMAGE_BYTES:
+            raise serializers.ValidationError("Image is too large (max 5 MB).")
+        return value
+
+
+class ProductSpecificationSerializer(serializers.Serializer):
+    """
+    Generic label/value row for the spec table on the product detail page.
+    Assumes a related model (e.g. ProductSpecification with a FK to Product)
+    exposed via a `specifications` related_name/manager on Product.
+    """
+    label = serializers.CharField()
+    value = serializers.CharField()
+
+
+class FitmentSummarySerializer(serializers.Serializer):
+    """Lightweight 'this part fits' summary, used on the product detail page."""
+    make = serializers.CharField(source="vehicle_year.model.make.name")
+    model = serializers.CharField(source="vehicle_year.model.name")
+    year = serializers.IntegerField(source="vehicle_year.year")
+    notes = serializers.CharField()
+
+
+class ProductListSerializer(serializers.ModelSerializer):
+    """
+    Compact representation for catalog grids / search results.
+
+    It also carries everything the admin edit form needs to pre-fill
+    (ids, description, stock, threshold, is_active).
+    """
+    category = serializers.CharField(source="category.name", read_only=True)
+    brand = serializers.CharField(source="brand.name", read_only=True)
+    category_id = serializers.UUIDField(read_only=True)
+    brand_id = serializers.UUIDField(read_only=True)
+    primary_image = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Product
+        fields = [
+            "id", "sku", "name", "slug", "category", "category_id",
+            "brand", "brand_id", "description", "condition",
+            "price", "stock_quantity", "low_stock_threshold", "is_active",
+            "is_in_stock", "is_low_stock", "primary_image",
+        ]
+
+    def get_primary_image(self, obj):
+        # Uses .all() so prefetch_related("images") is honoured (one query for the page, not one per row).
+        images = list(obj.images.all())
+        image = next((i for i in images if i.is_primary), None) or (images[0] if images else None)
+        return image.image.url if image and image.image else None
+
+
+class ProductDetailSerializer(serializers.ModelSerializer):
+    category = CategorySerializer(read_only=True)
+    brand = BrandSerializer(read_only=True)
+    images = ProductImageSerializer(many=True, read_only=True)
+    fitments = FitmentSummarySerializer(many=True, read_only=True)
+
+    # Extra product-detail fields. Each uses getattr(..., default) so this
+    # won't crash if the underlying model field/relation doesn't exist yet.
+    oem_number = serializers.SerializerMethodField()
+    weight_kg = serializers.SerializerMethodField()
+    warranty_months = serializers.SerializerMethodField()
+    specifications = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Product
+        fields = [
+            "id", "sku", "name", "slug", "category", "brand", "description",
+            "condition", "price", "stock_quantity", "is_in_stock", "is_low_stock",
+            "images", "fitments", "created_at", "updated_at",
+            "oem_number", "weight_kg", "warranty_months", "specifications",
+        ]
+
+    def get_oem_number(self, obj):
+        return getattr(obj, "oem_number", None)
+
+    def get_weight_kg(self, obj):
+        value = getattr(obj, "weight_kg", None)
+        return str(value) if value is not None else None
+
+    def get_warranty_months(self, obj):
+        return getattr(obj, "warranty_months", None)
+
+    def get_specifications(self, obj):
+        specs = getattr(obj, "specifications", None)
+        if specs is None:
+            return []
+        if hasattr(specs, "all"):
+            return ProductSpecificationSerializer(specs.all(), many=True).data
+        return specs
+
+
+class ProductWriteSerializer(serializers.ModelSerializer):
+    slug = serializers.SlugField(max_length=280, required=False, help_text="Auto-generated from name if omitted.")
+
+    class Meta:
+        model = Product
+        fields = [
+            "id", "sku", "name", "slug", "category", "brand", "description",
+            "condition", "price", "stock_quantity", "low_stock_threshold", "is_active",
+        ]
+        read_only_fields = ["id"]
+
+    def validate_slug(self, value):
+        qs = Product.objects.filter(slug=value)
+        if self.instance is not None:
+            qs = qs.exclude(pk=self.instance.pk)
+        if qs.exists():
+            raise serializers.ValidationError("A product with this slug already exists.")
+        return value
+
+    def create(self, validated_data):
+        if not validated_data.get("slug"):
+            validated_data["slug"] = unique_slug(Product, validated_data["name"])
+        return super().create(validated_data)

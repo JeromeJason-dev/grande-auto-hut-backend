@@ -1,3 +1,4 @@
+from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
 from rest_framework import serializers
@@ -90,3 +91,12 @@ class GoogleAuthSerializer(serializers.Serializer):
 
 class VerifyEmailSerializer(serializers.Serializer):
     token = serializers.CharField()
+
+class EmailLoginSerializer(TokenObtainPairSerializer):
+    def validate(self, attrs):
+        email = (attrs.get(self.username_field) or "").strip()
+        if email:
+            match = User.objects.filter(email__iexact=email).only("email").first()
+            if match is not None:
+                attrs[self.username_field] = match.email
+        return super().validate(attrs)

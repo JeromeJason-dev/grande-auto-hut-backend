@@ -24,7 +24,7 @@ class WishlistListView(generics.ListAPIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
-        return Wishlist.objects.filter(user=self.request.user).select_related("product")
+        return Wishlist.objects.filter(user=self.request.user).select_related("product__category", "product__brand").prefetch_related("product__images")
 
 
 class WishlistAddView(views.APIView):

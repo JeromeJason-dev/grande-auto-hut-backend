@@ -24,6 +24,21 @@ def mpesa_charge_amount(amount) -> int:
     return int(Decimal(amount).to_integral_value(rounding=ROUND_CEILING))
 
 
+def mpesa_callback_url() -> str:
+    url = f"{settings.MPESA_CALLBACK_BASE_URL.rstrip('/')}/api/payments/mpesa/callback/"
+    if settings.MPESA_CALLBACK_SECRET:
+        url += f"?token={quote(settings.MPESA_CALLBACK_SECRET, safe='')}"
+    return url
+
+
+def valid_mpesa_callback_token(token: str) -> bool:
+    """True when no secret is configured (legacy setups) or the supplied token matches it."""
+    secret = settings.MPESA_CALLBACK_SECRET
+    if not secret:
+        return True
+    return hmac.compare_digest(str(token or "").encode(), secret.encode())
+
+
 class MpesaClient:
     def __init__(self):
         self.base_url = (
@@ -76,7 +91,7 @@ class MpesaClient:
             "PartyA": phone_number,
             "PartyB": settings.MPESA_SHORTCODE,
             "PhoneNumber": phone_number,
-            "CallBackURL": f"{settings.MPESA_CALLBACK_BASE_URL.rstrip('/')}/api/payments/mpesa/callback/",
+            "CallBackURL": mpesa_callback_url(),
             "AccountReference": account_reference,
             "TransactionDesc": transaction_desc,
         }
@@ -133,7 +148,7 @@ class MpesaClient:
 def extract_callback_metadata(stk_callback: dict) -> dict:
     """Flattens Safaricom's {Item: [{Name, Value}, ...]} shape into a plain dict."""
     items = (stk_callback.get("CallbackMetadata") or {}).get("Item", [])
-    return {item["Name"]: item.get("Value") for item in items}
+    return {item["Name"]: item.get("Value") for item in items if isinstance(item, dict) and "Name" in item}
 
 
 # Card payments - Paystack hosted checkout

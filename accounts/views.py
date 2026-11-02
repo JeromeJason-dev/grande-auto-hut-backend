@@ -26,7 +26,7 @@ from .throttles import (
 from .serializers import (
     RegisterSerializer, MeSerializer, ProfileUpdateSerializer, ChangePasswordSerializer,
     PasswordResetRequestSerializer, PasswordResetConfirmSerializer, AddressSerializer,
-    AdminCustomerSerializer, GoogleAuthSerializer, VerifyEmailSerializer,
+    AdminCustomerSerializer, GoogleAuthSerializer, VerifyEmailSerializer, EmailLoginSerializer,
 )
 
 User = get_user_model()
@@ -89,6 +89,7 @@ class RegisterView(generics.CreateAPIView):
 
 
 class LoginView(TokenObtainPairView):
+    serializer_class = EmailLoginSerializer
     # Per-IP and per-email limits: slows password guessing without locking real users out.
     throttle_classes = [LoginIPThrottle, LoginEmailThrottle]
 

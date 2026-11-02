@@ -39,3 +39,14 @@ class PasswordResetEmailThrottle(_EmailThrottle):
 
 class EmailVerifyThrottle(_IPThrottle):
     scope = "email_verify"
+
+
+class PaymentInitiateThrottle(SimpleRateThrottle):
+    """Per-user cap on STK pushes / card sessions, so nobody can spam prompts to a phone."""
+    scope = "payment_initiate"
+
+    def get_cache_key(self, request, view):
+        user = getattr(request, "user", None)
+        if not (user and user.is_authenticated):
+            return None
+        return self.cache_format % {"scope": self.scope, "ident": str(user.pk)}

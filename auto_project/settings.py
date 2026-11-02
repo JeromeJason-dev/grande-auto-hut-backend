@@ -87,9 +87,8 @@ CSRF_TRUSTED_ORIGINS = env_list('CSRF_TRUSTED_ORIGINS', '')
 # The Django admin lives at a non-default path (set ADMIN_URL to something private).
 ADMIN_URL = os.getenv('ADMIN_URL', 'admin/').strip('/') + '/'
 
-# Behind N reverse proxies DRF needs to know how many to skip to find the real
-# client IP (used by the throttles). 
-NUM_PROXIES = env_int('NUM_PROXIES', 1)
+# With 1, every visitor would look like the same IP and share one throttle bucket.
+NUM_PROXIES = env_int('NUM_PROXIES', 2)
 
 
 # Cloudinary (permanent product-image storage).
@@ -236,6 +235,7 @@ REST_FRAMEWORK = {
         'register': '10/hour',
         'password_reset': '5/hour',
         'email_verify': '10/hour',
+        'payment_initiate': '15/hour',
     },
     'NUM_PROXIES': NUM_PROXIES,
 }
@@ -335,6 +335,11 @@ MPESA_CONSUMER_SECRET = os.getenv('MPESA_CONSUMER_SECRET')
 MPESA_SHORTCODE = os.getenv('MPESA_SHORTCODE')
 MPESA_PASSKEY = os.getenv('MPESA_PASSKEY')
 MPESA_CALLBACK_BASE_URL = os.getenv("MPESA_CALLBACK_BASE_URL")
+# Shared secret appended to the callback URL (?token=...). Safaricom has no signature
+# scheme, so this keeps strangers from posting fake "paid" notices. Set it in production.
+MPESA_CALLBACK_SECRET = os.getenv("MPESA_CALLBACK_SECRET", "")
+if not (DEBUG or TESTING) and MPESA_CONSUMER_KEY and not MPESA_CALLBACK_SECRET:
+    warnings.warn("MPESA_CALLBACK_SECRET is not set: the M-Pesa callback URL is unauthenticated.", RuntimeWarning)
 
 
 # Card payments (Paystack hosted checkout)

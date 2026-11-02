@@ -112,7 +112,8 @@ def _checkout(cart: Cart, user, address_data: dict, payment_method: str) -> Orde
     cart.items.all().delete()
 
     if is_cod:
-        confirm_order(order, user=user, note="Auto-confirmed: Pay on Delivery.")
+        # confirm_order works on a freshly locked copy; use what it returns so the caller sees the new status.
+        order = confirm_order(order, user=user, note="Auto-confirmed: Pay on Delivery.")
 
     return order
 

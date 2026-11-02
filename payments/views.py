@@ -10,6 +10,7 @@ from rest_framework.response import Response
 from rest_framework.exceptions import ValidationError, PermissionDenied
 
 from accounts.permissions import IsAdmin, IsStaffOrAdmin
+from accounts.throttles import PaymentInitiateThrottle
 
 from orders.models import Order
 from orders.services import extend_reservation
@@ -21,7 +22,7 @@ from .serializers import (
 from .services import (
     CardPaymentError, MpesaClient, MpesaError, PaymentActionError, PaystackClient,
     extract_callback_metadata, finalize_card_payment, finalize_mpesa_payment,
-    mark_order_paid_manually, mpesa_charge_amount, reconcile_pending_mpesa_payments,
+    mark_order_paid_manually, mpesa_charge_amount, valid_mpesa_callback_token, reconcile_pending_mpesa_payments,
     recheck_order_payments, refund_order_payment, valid_paystack_signature,
 )
 
@@ -29,14 +30,8 @@ logger = logging.getLogger(__name__)
 
 
 class MpesaInitiateView(views.APIView):
-    """
-    POST /api/payments/mpesa/initiate/
-    Body: {"order_id": "...", "phone_number": "0712345678"}
-    Triggers an STK push prompt on the customer's phone for a pending,
-    M-Pesa-method order they own. Does NOT mark anything paid - only the
-    callback (below) does that, after Safaricom confirms the transaction.
-    """
     permission_classes = [permissions.IsAuthenticated]
+    throttle_classes = [PaymentInitiateThrottle]
 
     def post(self, request):
         serializer = MpesaInitiateSerializer(data=request.data)
@@ -89,37 +84,52 @@ class MpesaInitiateView(views.APIView):
 
 
 class MpesaCallbackView(views.APIView):
-    """
-    POST /api/payments/mpesa/callback/ - called by Safaricom's servers, not
-    the frontend. No user auth (Safaricom can't hold a JWT), so instead we
-    verify by matching CheckoutRequestID against a Payment WE created, and
-    cross-check the paid amount against what we expected before crediting
-    anything. In production, also restrict this URL at the network/WAF layer
-    to Safaricom's published IP ranges.
-    """
     permission_classes = [permissions.AllowAny]
     authentication_classes = []
 
     def post(self, request):
-        body = request.data.get("Body", {})
-        stk_callback = body.get("stkCallback", {})
-        checkout_request_id = stk_callback.get("CheckoutRequestID")
-        result_code = stk_callback.get("ResultCode")
-        result_desc = stk_callback.get("ResultDesc", "")
+        if not valid_mpesa_callback_token(request.query_params.get("token", "")):
+            logger.warning("M-Pesa callback rejected: bad or missing token.")
+            return Response({"detail": "Forbidden."}, status=status.HTTP_403_FORBIDDEN)
 
-        payment = Payment.objects.filter(mpesa_checkout_request_id=checkout_request_id).select_related("order").first()
+        data = request.data if isinstance(request.data, dict) else {}
+        body = data.get("Body") if isinstance(data.get("Body"), dict) else {}
+        stk_callback = body.get("stkCallback") if isinstance(body.get("stkCallback"), dict) else {}
+        checkout_request_id = stk_callback.get("CheckoutRequestID")
+        result_desc = stk_callback.get("ResultDesc", "")
+        try:
+            result_code = int(stk_callback.get("ResultCode"))
+        except (TypeError, ValueError):
+            return Response({"ResultCode": 0, "ResultDesc": "Accepted"})  # malformed: nothing to apply
+
+        payment = (
+            Payment.objects.filter(mpesa_checkout_request_id=checkout_request_id).select_related("order").first()
+            if checkout_request_id else None
+        )
         if not payment:
             logger.warning("M-Pesa callback for unknown CheckoutRequestID: %s", checkout_request_id)
             # Still ack 200 so Safaricom doesn't retry indefinitely on a request we'll never match.
             return Response({"ResultCode": 0, "ResultDesc": "Accepted"})
 
+        if result_code == 0:
+            # Never trust a "paid" notice on its own: ask Safaricom directly. If the query can't
+            # confirm it right now, leave the payment pending.
+            try:
+                outcome = MpesaClient().stk_query(checkout_request_id)
+            except (MpesaError, requests.RequestException):
+                logger.exception("Could not confirm M-Pesa callback for %s; left pending.", checkout_request_id)
+                return Response({"ResultCode": 0, "ResultDesc": "Accepted"})
+            if outcome is None or outcome["result_code"] != 0:
+                logger.warning("M-Pesa callback claimed success for %s but Safaricom says %s; ignored.",
+                               checkout_request_id, outcome)
+                return Response({"ResultCode": 0, "ResultDesc": "Accepted"})
+            metadata = extract_callback_metadata(stk_callback)
+        else:
+            metadata = {}
+
         # Shared with the status endpoint below, so both apply outcomes identically.
         finalize_mpesa_payment(
-            payment.pk,
-            result_code=int(result_code) if result_code is not None else -1,
-            result_desc=result_desc,
-            metadata=extract_callback_metadata(stk_callback) if result_code == 0 else {},
-            raw=request.data,
+            payment.pk, result_code=result_code, result_desc=result_desc, metadata=metadata, raw=request.data,
         )
         return Response({"ResultCode": 0, "ResultDesc": "Accepted"})
 
@@ -160,6 +170,7 @@ def _get_owned_order(request, order_id):
 
 class CardInitiateView(views.APIView):
     permission_classes = [permissions.IsAuthenticated]
+    throttle_classes = [PaymentInitiateThrottle]
 
     def post(self, request):
         serializer = CardInitiateSerializer(data=request.data)
