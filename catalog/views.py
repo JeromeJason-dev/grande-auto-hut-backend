@@ -2,6 +2,7 @@ from django_filters.rest_framework import DjangoFilterBackend, FilterSet, filter
 from django.shortcuts import get_object_or_404
 from django.db.models import ProtectedError
 from rest_framework import generics, filters as drf_filters, status
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.permissions import SAFE_METHODS
@@ -68,8 +69,14 @@ class ProductFilter(FilterSet):
 
 
 # --- Products ---
+class ProductPagination(PageNumberPagination):
+    # Catalog page shows 21 products per page (7 full rows on the 3-column desktop grid).
+    page_size = 21
+
+
 class ProductListView(generics.ListCreateAPIView):
     permission_classes = [AllowAnyReadOnlyOrStaffWrite]
+    pagination_class = ProductPagination
     filter_backends = [DjangoFilterBackend, drf_filters.SearchFilter, drf_filters.OrderingFilter]
     filterset_class = ProductFilter
     search_fields = ["name", "sku", "description"]
